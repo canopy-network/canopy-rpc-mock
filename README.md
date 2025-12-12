@@ -24,7 +24,7 @@ Each chain runs on its own port (e.g., 60000, 60001, …) with its own `chainID`
 
 ## Flags
 
-- `-chains` (int, default 1): number of chains to launch.
+- `-chains` (int, default 2): number of chains to launch.
 - `-start-port` (int, default 60000): port for the first chain; increments per chain.
 - `-blocks` (int, default 25): number of blocks to prebuild per chain.
 - `-start-chain-id` (uint64, default 5): chain ID for the first chain; increments per chain.
