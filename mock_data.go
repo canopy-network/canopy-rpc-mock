@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math/rand"
 	"sync"
 	"time"
@@ -164,11 +163,21 @@ func buildValidators(chainID uint64, rng *rand.Rand) []*fsm.Validator {
 		})
 	}
 	printOnce.Do(func() {
+		ks := crypto.NewKeystoreInMemory()
 		for i, seedHex := range seeds {
 			seed, _ := hex.DecodeString(seedHex)
 			priv := ed25519.NewKeyFromSeed(seed)
-			log.Printf("Private Key %d: %x\n", i+1, priv)
+			pk, err := crypto.NewPrivateKeyFromBytes(priv)
+			if err != nil {
+				panic(err)
+			}
+			if _, err = ks.ImportRaw(pk.Bytes(), "test", crypto.ImportRawOpts{
+				Nickname: fmt.Sprintf("generated-key-%d", i+1)}); err != nil {
+				panic(err)
+			}
+			fmt.Printf("Private Key %d: %x\n", i+1, priv)
 		}
+		fmt.Println(lib.MarshalJSONIndentString(ks))
 	})
 	return validators
 }
@@ -729,6 +738,7 @@ func (mc *mockChain) applyScheduledDex(state *mockState, height uint64) {
 			BlockHash:   blockHash(height),
 			ChainId:     mc.chainID,
 			Address:     o.Address,
+			Reference:   "BEGIN_BLOCK",
 		})
 	}
 	for _, d := range batch.Deposits {
@@ -740,6 +750,7 @@ func (mc *mockChain) applyScheduledDex(state *mockState, height uint64) {
 			BlockHash:   blockHash(height),
 			ChainId:     mc.chainID,
 			Address:     d.Address,
+			Reference:   "BEGIN_BLOCK",
 		})
 	}
 	for _, w := range batch.Withdrawals {
@@ -753,6 +764,7 @@ func (mc *mockChain) applyScheduledDex(state *mockState, height uint64) {
 			BlockHash:   blockHash(height),
 			ChainId:     mc.chainID,
 			Address:     w.Address,
+			Reference:   "BEGIN_BLOCK",
 		})
 	}
 	if len(ev) > 0 {

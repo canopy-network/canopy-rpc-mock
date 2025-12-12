@@ -99,7 +99,7 @@ func (s *mockState) beginBlock(height uint64) *lib.QuorumCertificate {
 	}
 	// occasional slash evidence event
 	if height%25 == 0 && len(vals) > 0 {
-		s.addEvents(nil, buildEvent("slash", &lib.Event_Slash{Slash: &lib.EventSlash{Amount: 100}}, height, s.chainID, vals[0].addr, vals[0].addr))
+		s.addEvents(nil, buildEvent("slash", &lib.Event_Slash{Slash: &lib.EventSlash{Amount: 100}}, height, s.chainID, vals[0].addr, "BEGIN_BLOCK"))
 	}
 	if height%30 == 0 && len(vals) > 1 {
 		s.doubleSign = []*lib.DoubleSigner{{Id: vals[1].addr, Heights: []uint64{height - 1, height}}}
@@ -133,7 +133,7 @@ func (s *mockState) endBlock(proposer []byte) lib.Events {
 			s.accounts[hex.EncodeToString(val.outputAddress)] += val.stake
 			val.stake = 0
 			val.unstakingAt = 0
-			evt := buildEvent("finishUnstaking", &lib.Event_FinishUnstaking{FinishUnstaking: &lib.EventFinishUnstaking{}}, s.height, s.chainID, val.addr, val.addr)
+			evt := buildEvent("finishUnstaking", &lib.Event_FinishUnstaking{FinishUnstaking: &lib.EventFinishUnstaking{}}, s.height, s.chainID, val.addr, "BEGIN_BLOCK")
 			s.addEvents(nil, evt)
 		}
 		if val.paused && s.height%5 == 0 {
@@ -151,6 +151,7 @@ func (s *mockState) endBlock(proposer []byte) lib.Events {
 
 func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result *lib.TxResult, events lib.Events) {
 	var sender []byte
+	txHashStr := hex.EncodeToString(hashBytes(txType, s.height))
 	switch m := msg.(type) {
 	case *fsm.MessageSend:
 		sender = m.FromAddress
@@ -163,7 +164,7 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 			EventType:   "reward",
 			Msg:         &lib.Event_Reward{Reward: &lib.EventReward{Amount: m.Amount / 100}},
 			Height:      s.height,
-			Reference:   "send",
+			Reference:   txHashStr,
 			ChainId:     s.chainID,
 			BlockHeight: s.height,
 			BlockHash:   blockHash(s.height),
@@ -190,7 +191,7 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 		if val, ok := s.validators[key]; ok {
 			val.unstakingAt = s.height + 5
 			s.validators[key] = val
-			events = s.addEvents(events, buildEvent("autoBeginUnstaking", &lib.Event_AutoBeginUnstaking{AutoBeginUnstaking: &lib.EventAutoBeginUnstaking{}}, s.height, s.chainID, m.Address, m.Address))
+			events = s.addEvents(events, buildEvent("autoBeginUnstaking", &lib.Event_AutoBeginUnstaking{AutoBeginUnstaking: &lib.EventAutoBeginUnstaking{}}, s.height, s.chainID, m.Address, txHashStr))
 		}
 	case *fsm.MessagePause:
 		sender = m.Address
@@ -199,7 +200,7 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 			val.paused = true
 			s.validators[key] = val
 		}
-		events = s.addEvents(events, buildEvent("autoPause", &lib.Event_AutoPause{AutoPause: &lib.EventAutoPause{}}, s.height, s.chainID, m.Address, m.Address))
+		events = s.addEvents(events, buildEvent("autoPause", &lib.Event_AutoPause{AutoPause: &lib.EventAutoPause{}}, s.height, s.chainID, m.Address, txHashStr))
 	case *fsm.MessageUnpause:
 		sender = m.Address
 		key := hex.EncodeToString(m.Address)
@@ -218,7 +219,7 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 		sender = m.Address
 		destKey := hex.EncodeToString(m.Address)
 		s.accounts[destKey] += m.Amount
-		ev := buildEvent("reward", &lib.Event_Reward{Reward: &lib.EventReward{Amount: m.Amount}}, s.height, s.chainID, m.Address, m.Address)
+		ev := buildEvent("reward", &lib.Event_Reward{Reward: &lib.EventReward{Amount: m.Amount}}, s.height, s.chainID, m.Address, txHashStr)
 		events = s.addEvents(events, ev)
 	case *fsm.MessageSubsidy:
 		sender = m.Address
@@ -248,7 +249,8 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 			BuyerSendAddress:     m.SellersSendAddress,
 			SellersSendAddress:   m.SellersSendAddress,
 			OrderId:              hashBytes("order", s.height, len(ob)),
-		}}, s.height, s.chainID, m.SellersSendAddress, m.SellersSendAddress)
+			Data:                 m.Data,
+		}}, s.height, s.chainID, m.SellersSendAddress, txHashStr)
 		events = s.addEvents(events, ev)
 	case *fsm.MessageEditOrder:
 		ob := s.orderBooks[m.ChainId]
@@ -268,8 +270,8 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 		}
 		s.orderBooks[m.ChainId] = filter
 		ev := buildEvent("orderBookSwap", &lib.Event_OrderBookSwap{OrderBookSwap: &lib.EventOrderBookSwap{
-			SoldAmount: 0, BoughtAmount: 0, SellersSendAddress: sender, OrderId: m.OrderId,
-		}}, s.height, s.chainID, sender, sender)
+			SoldAmount: 50, BoughtAmount: 100, SellersSendAddress: sender, OrderId: m.OrderId, SellerReceiveAddress: sender, BuyerSendAddress: sender, Data: []byte("delete"),
+		}}, s.height, s.chainID, sender, txHashStr)
 		events = s.addEvents(events, ev)
 	case *fsm.MessageDexLimitOrder:
 		sender = m.Address
@@ -298,7 +300,7 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 		Height:      s.height,
 		Index:       0,
 		Transaction: tx,
-		TxHash:      hex.EncodeToString(hashBytes(txType, s.height)),
+		TxHash:      txHashStr,
 	}
 	return tx, result, events
 }
@@ -450,11 +452,11 @@ func mustAny(msg any) *anypb.Any {
 	return anyMsg
 }
 
-func buildEvent(typ string, msg interface{}, height uint64, chainID uint64, addr []byte, reference []byte) lib.Events {
+func buildEvent(typ string, msg interface{}, height uint64, chainID uint64, addr []byte, reference string) lib.Events {
 	ev := &lib.Event{
 		EventType:   typ,
 		Height:      height,
-		Reference:   hex.EncodeToString(reference),
+		Reference:   reference,
 		ChainId:     chainID,
 		BlockHeight: height,
 		BlockHash:   blockHash(height),
