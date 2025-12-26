@@ -151,7 +151,9 @@ func (s *mockState) endBlock(proposer []byte) lib.Events {
 
 func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result *lib.TxResult, events lib.Events) {
 	var sender []byte
-	txHashStr := hex.EncodeToString(hashBytes(txType, s.height))
+	txHash := hashBytes(txType, s.height)
+	txHashStr := hex.EncodeToString(txHash)
+	orderID := orderIDFromTxHashString(txHashStr)
 	switch m := msg.(type) {
 	case *fsm.MessageSend:
 		sender = m.FromAddress
@@ -275,10 +277,13 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 		events = s.addEvents(events, ev)
 	case *fsm.MessageDexLimitOrder:
 		sender = m.Address
+		m.OrderId = orderID
 	case *fsm.MessageDexLiquidityDeposit:
 		sender = m.Address
+		m.OrderId = orderID
 	case *fsm.MessageDexLiquidityWithdraw:
 		sender = m.Address
+		m.OrderId = orderID
 	case *fsm.MessageCertificateResults:
 		sender = m.Qc.ProposerKey
 	}
@@ -303,6 +308,15 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 		TxHash:      txHashStr,
 	}
 	return tx, result, events
+}
+
+func orderIDFromTxHash(txHash []byte) []byte {
+	if len(txHash) < 20 {
+		return txHash
+	}
+	orderID := make([]byte, 20)
+	copy(orderID, txHash[:20])
+	return orderID
 }
 
 func (s *mockState) snapshot() *fsm.GenesisState {

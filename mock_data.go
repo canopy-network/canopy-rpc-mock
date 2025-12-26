@@ -87,7 +87,7 @@ func newMockChain(numBlocks int, chainID uint64) *mockChain {
 		mc.applyScheduledDex(state, height)
 		mc.rotateDexBatches(state, height)
 		blockTxs, txResults, _ := mc.buildBlockTransactions(state, height)
-		mc.trackDexOps(blockTxs, height)
+		mc.trackDexOps(txResults, height)
 
 		allEvents := state.endBlock(mc.validators[0].Address)
 
@@ -400,12 +400,11 @@ func (mc *mockChain) txBuilders(state *mockState, height uint64) []txBuilder {
 			AmountForSale:   2_500,
 			RequestedAmount: 200,
 			Address:         from,
-			OrderId:         hashBytes("dex", height),
 		}}}
 	case 14:
 		return []txBuilder{
-			{msgType: fsm.MessageDexLiquidityDepositName, msg: &fsm.MessageDexLiquidityDeposit{ChainId: mc.chainID, Amount: 4_000, Address: from, OrderId: hashBytes("lp", height)}},
-			{msgType: fsm.MessageDexLiquidityWithdrawName, msg: &fsm.MessageDexLiquidityWithdraw{ChainId: mc.chainID, Percent: 10, Address: nextVal.addr, OrderId: hashBytes("lp", height-1)}},
+			{msgType: fsm.MessageDexLiquidityDepositName, msg: &fsm.MessageDexLiquidityDeposit{ChainId: mc.chainID, Amount: 4_000, Address: from}},
+			{msgType: fsm.MessageDexLiquidityWithdrawName, msg: &fsm.MessageDexLiquidityWithdraw{ChainId: mc.chainID, Percent: 10, Address: nextVal.addr}},
 		}
 	default:
 		return nil
@@ -523,7 +522,7 @@ func (mc *mockChain) generateEvents(height uint64) []*lib.Event {
 					BoughtAmount: 900,
 					LocalOrigin:  true,
 					Success:      true,
-					OrderId:      hashBytes("dex-swap", height),
+					OrderId:      orderIDFromTxHash(hashBytes("dex-swap", height)),
 				},
 			},
 			Height:      height,
@@ -682,28 +681,43 @@ func (mc *mockChain) buildCertificateForTx(height uint64) *lib.QuorumCertificate
 	}
 }
 
-func (mc *mockChain) trackDexOps(txs []*lib.Transaction, height uint64) {
-	for _, tx := range txs {
-		switch tx.MessageType {
+func (mc *mockChain) trackDexOps(results []*lib.TxResult, height uint64) {
+	for _, res := range results {
+		if res == nil || res.Transaction == nil {
+			continue
+		}
+		orderID := orderIDFromTxHashString(res.TxHash)
+		switch res.Transaction.MessageType {
 		case fsm.MessageDexLimitOrderName:
 			msg := new(fsm.MessageDexLimitOrder)
-			_ = anypb.UnmarshalTo(tx.Msg, msg, proto.UnmarshalOptions{})
+			_ = anypb.UnmarshalTo(res.Transaction.Msg, msg, proto.UnmarshalOptions{})
 			mc.nextBatchOrders = append(mc.nextBatchOrders, &lib.DexLimitOrder{
 				AmountForSale:   msg.AmountForSale,
 				RequestedAmount: msg.RequestedAmount,
 				Address:         msg.Address,
-				OrderId:         msg.OrderId,
+				OrderId:         orderID,
 			})
 		case fsm.MessageDexLiquidityDepositName:
 			msg := new(fsm.MessageDexLiquidityDeposit)
-			_ = anypb.UnmarshalTo(tx.Msg, msg, proto.UnmarshalOptions{})
-			mc.nextBatchDeposits = append(mc.nextBatchDeposits, &lib.DexLiquidityDeposit{Address: msg.Address, Amount: msg.Amount, OrderId: msg.OrderId})
+			_ = anypb.UnmarshalTo(res.Transaction.Msg, msg, proto.UnmarshalOptions{})
+			mc.nextBatchDeposits = append(mc.nextBatchDeposits, &lib.DexLiquidityDeposit{Address: msg.Address, Amount: msg.Amount, OrderId: orderID})
 		case fsm.MessageDexLiquidityWithdrawName:
 			msg := new(fsm.MessageDexLiquidityWithdraw)
-			_ = anypb.UnmarshalTo(tx.Msg, msg, proto.UnmarshalOptions{})
-			mc.nextBatchWithdrawals = append(mc.nextBatchWithdrawals, &lib.DexLiquidityWithdraw{Address: msg.Address, Percent: msg.Percent, OrderId: msg.OrderId})
+			_ = anypb.UnmarshalTo(res.Transaction.Msg, msg, proto.UnmarshalOptions{})
+			mc.nextBatchWithdrawals = append(mc.nextBatchWithdrawals, &lib.DexLiquidityWithdraw{Address: msg.Address, Percent: msg.Percent, OrderId: orderID})
 		}
 	}
+}
+
+func orderIDFromTxHashString(txHash string) []byte {
+	if txHash == "" {
+		return nil
+	}
+	hashBytes, err := hex.DecodeString(txHash)
+	if err != nil {
+		return nil
+	}
+	return orderIDFromTxHash(hashBytes)
 }
 
 func (mc *mockChain) rotateDexBatches(state *mockState, height uint64) {
