@@ -99,7 +99,7 @@ func (s *mockState) beginBlock(height uint64) *lib.QuorumCertificate {
 	}
 	// occasional slash evidence event
 	if height%25 == 0 && len(vals) > 0 {
-		s.addEvents(nil, buildEvent("slash", &lib.Event_Slash{Slash: &lib.EventSlash{Amount: 100}}, height, s.chainID, vals[0].addr, "BEGIN_BLOCK"))
+		s.addEvents(nil, buildEvent(string(lib.EventTypeSlash), &lib.Event_Slash{Slash: &lib.EventSlash{Amount: 100}}, height, s.chainID, vals[0].addr, "BEGIN_BLOCK"))
 	}
 	if height%30 == 0 && len(vals) > 1 {
 		s.doubleSign = []*lib.DoubleSigner{{Id: vals[1].addr, Heights: []uint64{height - 1, height}}}
@@ -133,7 +133,7 @@ func (s *mockState) endBlock(proposer []byte) lib.Events {
 			s.accounts[hex.EncodeToString(val.outputAddress)] += val.stake
 			val.stake = 0
 			val.unstakingAt = 0
-			evt := buildEvent("finish-unstaking", &lib.Event_FinishUnstaking{FinishUnstaking: &lib.EventFinishUnstaking{}}, s.height, s.chainID, val.addr, "BEGIN_BLOCK")
+			evt := buildEvent(string(lib.EventTypeFinishUnstaking), &lib.Event_FinishUnstaking{FinishUnstaking: &lib.EventFinishUnstaking{}}, s.height, s.chainID, val.addr, "BEGIN_BLOCK")
 			s.addEvents(nil, evt)
 		}
 		if val.paused && s.height%5 == 0 {
@@ -163,7 +163,7 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 			s.accounts[toKey] += m.Amount
 		}
 		events = s.addEvents(events, lib.Events{{
-			EventType:   "reward",
+			EventType:   string(lib.EventTypeReward),
 			Msg:         &lib.Event_Reward{Reward: &lib.EventReward{Amount: m.Amount / 100}},
 			Height:      s.height,
 			Reference:   txHashStr,
@@ -193,7 +193,7 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 		if val, ok := s.validators[key]; ok {
 			val.unstakingAt = s.height + 5
 			s.validators[key] = val
-			events = s.addEvents(events, buildEvent("auto-begin-unstaking", &lib.Event_AutoBeginUnstaking{AutoBeginUnstaking: &lib.EventAutoBeginUnstaking{}}, s.height, s.chainID, m.Address, txHashStr))
+			events = s.addEvents(events, buildEvent(string(lib.EventTypeAutoBeginUnstaking), &lib.Event_AutoBeginUnstaking{AutoBeginUnstaking: &lib.EventAutoBeginUnstaking{}}, s.height, s.chainID, m.Address, txHashStr))
 		}
 	case *fsm.MessagePause:
 		sender = m.Address
@@ -202,7 +202,7 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 			val.paused = true
 			s.validators[key] = val
 		}
-		events = s.addEvents(events, buildEvent("auto-pause", &lib.Event_AutoPause{AutoPause: &lib.EventAutoPause{}}, s.height, s.chainID, m.Address, txHashStr))
+		events = s.addEvents(events, buildEvent(string(lib.EventTypeAutoPause), &lib.Event_AutoPause{AutoPause: &lib.EventAutoPause{}}, s.height, s.chainID, m.Address, txHashStr))
 	case *fsm.MessageUnpause:
 		sender = m.Address
 		key := hex.EncodeToString(m.Address)
@@ -221,7 +221,7 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 		sender = m.Address
 		destKey := hex.EncodeToString(m.Address)
 		s.accounts[destKey] += m.Amount
-		ev := buildEvent("reward", &lib.Event_Reward{Reward: &lib.EventReward{Amount: m.Amount}}, s.height, s.chainID, m.Address, txHashStr)
+		ev := buildEvent(string(lib.EventTypeReward), &lib.Event_Reward{Reward: &lib.EventReward{Amount: m.Amount}}, s.height, s.chainID, m.Address, txHashStr)
 		events = s.addEvents(events, ev)
 	case *fsm.MessageSubsidy:
 		sender = m.Address
@@ -244,7 +244,7 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 			SellersSendAddress:   m.SellersSendAddress,
 		})
 		s.orderBooks[m.ChainId] = ob
-		ev := buildEvent("order-book-swap", &lib.Event_OrderBookSwap{OrderBookSwap: &lib.EventOrderBookSwap{
+		ev := buildEvent(string(lib.EventTypeOrderBookSwap), &lib.Event_OrderBookSwap{OrderBookSwap: &lib.EventOrderBookSwap{
 			SoldAmount:           m.AmountForSale,
 			BoughtAmount:         m.RequestedAmount,
 			SellerReceiveAddress: m.SellerReceiveAddress,
@@ -271,7 +271,7 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 			}
 		}
 		s.orderBooks[m.ChainId] = filter
-		ev := buildEvent("order-book-swap", &lib.Event_OrderBookSwap{OrderBookSwap: &lib.EventOrderBookSwap{
+		ev := buildEvent(string(lib.EventTypeOrderBookSwap), &lib.Event_OrderBookSwap{OrderBookSwap: &lib.EventOrderBookSwap{
 			SoldAmount: 50, BoughtAmount: 100, SellersSendAddress: sender, OrderId: m.OrderId, SellerReceiveAddress: sender, BuyerSendAddress: sender, Data: []byte("delete"),
 		}}, s.height, s.chainID, sender, txHashStr)
 		events = s.addEvents(events, ev)

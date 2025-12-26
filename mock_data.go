@@ -502,7 +502,7 @@ func (mc *mockChain) generateEvents(height uint64) []*lib.Event {
 	evts := make([]*lib.Event, 0, len(mc.txs[height])+1)
 	for idx, tx := range mc.txs[height] {
 		evts = append(evts, &lib.Event{
-			EventType:   "reward",
+			EventType:   string(lib.EventTypeReward),
 			Msg:         &lib.Event_Reward{Reward: &lib.EventReward{Amount: 5 + uint64(idx)}},
 			Height:      height,
 			Reference:   tx.TxHash,
@@ -515,7 +515,7 @@ func (mc *mockChain) generateEvents(height uint64) []*lib.Event {
 	// add a synthetic dex swap event every 5 blocks
 	if height%5 == 0 {
 		evts = append(evts, &lib.Event{
-			EventType: "dex-swap",
+			EventType: string(lib.EventTypeDexSwap),
 			Msg: &lib.Event_DexSwap{
 				DexSwap: &lib.EventDexSwap{
 					SoldAmount:   1_000,
@@ -745,7 +745,7 @@ func (mc *mockChain) applyScheduledDex(state *mockState, height uint64) {
 	var ev lib.Events
 	for _, o := range batch.Orders {
 		ev = append(ev, &lib.Event{
-			EventType:   "dex-swap",
+			EventType:   string(lib.EventTypeDexSwap),
 			Msg:         &lib.Event_DexSwap{DexSwap: &lib.EventDexSwap{SoldAmount: o.AmountForSale, BoughtAmount: o.RequestedAmount, LocalOrigin: true, Success: true, OrderId: o.OrderId}},
 			Height:      height,
 			BlockHeight: height,
@@ -757,7 +757,7 @@ func (mc *mockChain) applyScheduledDex(state *mockState, height uint64) {
 	}
 	for _, d := range batch.Deposits {
 		ev = append(ev, &lib.Event{
-			EventType:   "dex-liquidity-deposit",
+			EventType:   string(lib.EventTypeDexLiquidityDeposit),
 			Msg:         &lib.Event_DexLiquidityDeposit{DexLiquidityDeposit: &lib.EventDexLiquidityDeposit{Amount: d.Amount, Points: d.Amount / 10, OrderId: d.OrderId}},
 			Height:      height,
 			BlockHeight: height,
@@ -769,7 +769,7 @@ func (mc *mockChain) applyScheduledDex(state *mockState, height uint64) {
 	}
 	for _, w := range batch.Withdrawals {
 		ev = append(ev, &lib.Event{
-			EventType: "dex-liquidity-withdrawal",
+			EventType: string(lib.EventTypeDexLiquidityWithdraw),
 			Msg: &lib.Event_DexLiquidityWithdrawal{DexLiquidityWithdrawal: &lib.EventDexLiquidityWithdrawal{
 				LocalAmount: 0, RemoteAmount: 0, OrderId: w.OrderId, PointsBurned: w.Percent,
 			}},
