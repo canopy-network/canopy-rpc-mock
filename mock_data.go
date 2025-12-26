@@ -502,7 +502,7 @@ func (mc *mockChain) generateEvents(height uint64) []*lib.Event {
 	evts := make([]*lib.Event, 0, len(mc.txs[height])+1)
 	for idx, tx := range mc.txs[height] {
 		evts = append(evts, &lib.Event{
-			EventType:   "reward",
+			EventType:   string(lib.EventTypeReward),
 			Msg:         &lib.Event_Reward{Reward: &lib.EventReward{Amount: 5 + uint64(idx)}},
 			Height:      height,
 			Reference:   tx.TxHash,
@@ -515,7 +515,7 @@ func (mc *mockChain) generateEvents(height uint64) []*lib.Event {
 	// add a synthetic dex swap event every 5 blocks
 	if height%5 == 0 {
 		evts = append(evts, &lib.Event{
-			EventType: string(lib.EventTypeDexSwap), // Use constant instead of hardcoded "dexSwap"
+			EventType: string(lib.EventTypeDexSwap),
 			Msg: &lib.Event_DexSwap{
 				DexSwap: &lib.EventDexSwap{
 					SoldAmount:   1_000,
