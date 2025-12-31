@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"sort"
@@ -259,6 +260,7 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 		ob := s.orderBooks[m.ChainId]
 		for _, o := range ob {
 			if hex.EncodeToString(o.Id) == hex.EncodeToString(m.OrderId) {
+				sender = o.SellersSendAddress // Sender is the original order creator
 				o.AmountForSale = m.AmountForSale
 				o.RequestedAmount = m.RequestedAmount
 			}
@@ -269,6 +271,8 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 		for _, o := range ob {
 			if hex.EncodeToString(o.Id) != hex.EncodeToString(m.OrderId) {
 				filter = append(filter, o)
+			} else {
+				sender = o.SellersSendAddress // Sender is the original order creator
 			}
 		}
 		s.orderBooks[m.ChainId] = filter
@@ -286,7 +290,11 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 		sender = m.Address
 		m.OrderId = orderID
 	case *fsm.MessageCertificateResults:
-		sender = m.Qc.ProposerKey
+		// Derive address from proposer's public key (SHA256 hash, first 20 bytes)
+		if len(m.Qc.ProposerKey) > 0 {
+			hash := sha256.Sum256(m.Qc.ProposerKey)
+			sender = hash[:20]
+		}
 	}
 
 	tx = &lib.Transaction{
