@@ -444,7 +444,8 @@ func buildPoll(validators []*fsm.Validator) fsm.Poll {
 
 func buildProposals(validators []*fsm.Validator) fsm.GovProposals {
 	signer := hex.EncodeToString(validators[0].Address)
-	proposal := map[string]any{
+	recipient := hex.EncodeToString(validators[1].Address)
+	paramProposal := map[string]any{
 		"type": "changeParameter",
 		"msg": map[string]any{
 			"parameterSpace": "fee",
@@ -455,10 +456,24 @@ func buildProposals(validators []*fsm.Validator) fsm.GovProposals {
 			"signer":         signer,
 		},
 	}
-	raw, _ := json.Marshal(proposal)
+	daoProposal := map[string]any{
+		"type": "daoTransfer",
+		"msg": map[string]any{
+			"address":     recipient,
+			"amount":      250_000,
+			"startHeight": 10,
+			"endHeight":   100,
+		},
+	}
+	paramRaw, _ := json.Marshal(paramProposal)
+	daoRaw, _ := json.Marshal(daoProposal)
 	return fsm.GovProposals{
 		hex.EncodeToString(hashBytes("proposal:change-fee")): {
-			Proposal: raw,
+			Proposal: paramRaw,
+			Approve:  true,
+		},
+		hex.EncodeToString(hashBytes("proposal:dao-treasury")): {
+			Proposal: daoRaw,
 			Approve:  true,
 		},
 	}
@@ -834,6 +849,9 @@ func (mc *mockChain) dexPricesAt(height uint64) []lib.DexPrice {
 }
 
 func (mc *mockChain) nonSigners(height uint64) fsm.NonSigners {
+	if height != 0 && height%10 == 0 {
+		return nil
+	}
 	if state := mc.stateAt(height); state != nil {
 		return state.NonSigners
 	}

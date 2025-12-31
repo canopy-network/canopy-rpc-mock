@@ -6,7 +6,7 @@ toolchain go1.24.5
 
 require (
 	github.com/alecthomas/units v0.0.0-20240927000941-0f3dac36c52b
-	github.com/canopy-network/canopy v0.1.15-0.20251228012804-cd7b38c19887
+	github.com/canopy-network/canopy v0.1.15-0.20251231192241-b9dd8d76afe5
 	github.com/ethereum/go-ethereum v1.16.7
 	github.com/gorilla/websocket v1.5.3
 	github.com/julienschmidt/httprouter v1.3.0
