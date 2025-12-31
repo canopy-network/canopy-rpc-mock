@@ -383,13 +383,14 @@ func (mc *mockChain) txBuilders(state *mockState, height uint64) []txBuilder {
 			SellersSendAddress:   from,
 		}}}
 	case 11:
+		createOrderSender := state.validatorsOrdered()[(int(height)-1)%len(state.validatorsOrdered())].addr
 		createOrderID := orderIDFromTxHash(hashBytes(fsm.MessageCreateOrderName, height-1))
 		return []txBuilder{{msgType: fsm.MessageEditOrderName, msg: &fsm.MessageEditOrder{
 			ChainId:              mc.chainID,
 			OrderId:              createOrderID,
 			AmountForSale:        12_000,
 			RequestedAmount:      600,
-			SellerReceiveAddress: []byte{},
+			SellerReceiveAddress: createOrderSender,
 		}}}
 	case 12:
 		createOrderID := orderIDFromTxHash(hashBytes(fsm.MessageCreateOrderName, height-2))
