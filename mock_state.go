@@ -230,9 +230,10 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 		}
 	case *fsm.MessageCreateOrder:
 		sender = m.SellersSendAddress
+		m.OrderId = orderID
 		ob := s.orderBooks[m.ChainId]
 		ob = append(ob, &lib.SellOrder{
-			Id:                   hashBytes("order", s.height, len(ob)),
+			Id:                   orderID,
 			Committee:            m.ChainId,
 			Data:                 m.Data,
 			AmountForSale:        m.AmountForSale,
@@ -250,7 +251,7 @@ func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result
 			SellerReceiveAddress: m.SellerReceiveAddress,
 			BuyerSendAddress:     m.SellersSendAddress,
 			SellersSendAddress:   m.SellersSendAddress,
-			OrderId:              hashBytes("order", s.height, len(ob)),
+			OrderId:              orderID,
 			Data:                 m.Data,
 		}}, s.height, s.chainID, m.SellersSendAddress, txHashStr)
 		events = s.addEvents(events, ev)
@@ -445,20 +446,59 @@ func (s *mockState) applyBatchDeposits(deposits []*lib.DexLiquidityDeposit) {
 	}
 }
 
-func (s *mockState) applyBatchWithdrawals(withdrawals []*lib.DexLiquidityWithdraw) {
-	for _, w := range withdrawals {
-		liqID := s.chainID + fsm.LiquidityPoolAddend
-		if pool, ok := s.pools[liqID]; ok {
-			withdraw := (pool.Amount * w.Percent) / 100
-			if pool.Amount > withdraw {
-				pool.Amount -= withdraw
-			}
-			burn := (pool.TotalPoolPoints * w.Percent) / 100
-			if pool.TotalPoolPoints > burn {
-				pool.TotalPoolPoints -= burn
-			}
-		}
+type dexWithdrawalResult struct {
+	localAmount  uint64
+	pointsBurned uint64
+}
+
+func (s *mockState) applyBatchWithdrawals(withdrawals []*lib.DexLiquidityWithdraw) []dexWithdrawalResult {
+	results := make([]dexWithdrawalResult, len(withdrawals))
+	liqID := s.chainID + fsm.LiquidityPoolAddend
+	pool, ok := s.pools[liqID]
+	if !ok || pool == nil {
+		return results
 	}
+	if pool.TotalPoolPoints == 0 || pool.Amount == 0 {
+		return results
+	}
+	pointsByAddress := make(map[string]uint64, len(pool.Points))
+	for _, lp := range pool.Points {
+		pointsByAddress[string(lp.Address)] = lp.Points
+	}
+	initialPoolAmount := pool.Amount
+	initialTotalPoints := pool.TotalPoolPoints
+	var totalWithdrawn uint64
+	for i, w := range withdrawals {
+		key := string(w.Address)
+		points := pointsByAddress[key]
+		percent := w.Percent
+		if percent > 100 {
+			percent = 100
+		}
+		burn := lib.SafeMulDiv(points, percent, 100)
+		if burn > points {
+			burn = points
+		}
+		if burn > 0 {
+			pointsByAddress[key] = points - burn
+		}
+		withdraw := lib.SafeMulDiv(initialPoolAmount, burn, initialTotalPoints)
+		totalWithdrawn += withdraw
+		results[i] = dexWithdrawalResult{localAmount: withdraw, pointsBurned: burn}
+	}
+	if pool.Amount > totalWithdrawn {
+		pool.Amount -= totalWithdrawn
+	} else {
+		pool.Amount = 0
+	}
+	for i, w := range withdrawals {
+		burn := results[i].pointsBurned
+		if burn == 0 {
+			continue
+		}
+		_ = pool.RemovePoints(w.Address, burn)
+	}
+	return results
 }
 
 func mustAny(msg any) *anypb.Any {

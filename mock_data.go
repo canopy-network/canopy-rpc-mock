@@ -383,16 +383,19 @@ func (mc *mockChain) txBuilders(state *mockState, height uint64) []txBuilder {
 			SellersSendAddress:   from,
 		}}}
 	case 11:
+		createOrderID := orderIDFromTxHash(hashBytes(fsm.MessageCreateOrderName, height-1))
 		return []txBuilder{{msgType: fsm.MessageEditOrderName, msg: &fsm.MessageEditOrder{
-			ChainId:         mc.chainID,
-			OrderId:         hashBytes("order", height-1, 0),
-			AmountForSale:   12_000,
-			RequestedAmount: 600,
+			ChainId:              mc.chainID,
+			OrderId:              createOrderID,
+			AmountForSale:        12_000,
+			RequestedAmount:      600,
+			SellerReceiveAddress: []byte{},
 		}}}
 	case 12:
+		createOrderID := orderIDFromTxHash(hashBytes(fsm.MessageCreateOrderName, height-2))
 		return []txBuilder{{msgType: fsm.MessageDeleteOrderName, msg: &fsm.MessageDeleteOrder{
 			ChainId: mc.chainID,
-			OrderId: hashBytes("order", height-2, 0),
+			OrderId: createOrderID,
 		}}}
 	case 13:
 		return []txBuilder{{msgType: fsm.MessageDexLimitOrderName, msg: &fsm.MessageDexLimitOrder{
@@ -740,7 +743,7 @@ func (mc *mockChain) applyScheduledDex(state *mockState, height uint64) {
 
 	state.applyBatchOrders(batch.Orders)
 	state.applyBatchDeposits(batch.Deposits)
-	state.applyBatchWithdrawals(batch.Withdrawals)
+	withdrawResults := state.applyBatchWithdrawals(batch.Withdrawals)
 
 	var ev lib.Events
 	for _, o := range batch.Orders {
@@ -767,11 +770,21 @@ func (mc *mockChain) applyScheduledDex(state *mockState, height uint64) {
 			Reference:   "BEGIN_BLOCK",
 		})
 	}
-	for _, w := range batch.Withdrawals {
+	for i, w := range batch.Withdrawals {
+		localAmount := uint64(0)
+		pointsBurned := uint64(0)
+		if i < len(withdrawResults) {
+			localAmount = withdrawResults[i].localAmount
+			pointsBurned = withdrawResults[i].pointsBurned
+		}
+		remoteAmount := localAmount
+		if batch.PoolSize > 0 && batch.CounterPoolSize > 0 {
+			remoteAmount = lib.SafeMulDiv(localAmount, batch.CounterPoolSize, batch.PoolSize)
+		}
 		ev = append(ev, &lib.Event{
 			EventType: string(lib.EventTypeDexLiquidityWithdraw),
 			Msg: &lib.Event_DexLiquidityWithdrawal{DexLiquidityWithdrawal: &lib.EventDexLiquidityWithdrawal{
-				LocalAmount: 0, RemoteAmount: 0, OrderId: w.OrderId, PointsBurned: w.Percent,
+				LocalAmount: localAmount, RemoteAmount: remoteAmount, OrderId: w.OrderId, PointsBurned: pointsBurned,
 			}},
 			Height:      height,
 			BlockHeight: height,
@@ -788,6 +801,35 @@ func (mc *mockChain) applyScheduledDex(state *mockState, height uint64) {
 
 func (mc *mockChain) latestHeight() uint64 {
 	return uint64(len(mc.blocks))
+}
+
+func (mc *mockChain) dexPricesAt(height uint64) []lib.DexPrice {
+	if height == 0 {
+		height = mc.latestHeight()
+	}
+	batch, ok := mc.dexBatches[height]
+	if !ok || batch == nil || batch.PoolSize == 0 || batch.CounterPoolSize == 0 {
+		return nil
+	}
+	scale := func(local, remote uint64) uint64 {
+		return lib.SafeMulDiv(local, 1_000_000, remote)
+	}
+	return []lib.DexPrice{
+		{
+			LocalChainId:  mc.chainID,
+			RemoteChainId: mc.chainID + 1,
+			LocalPool:     batch.PoolSize,
+			RemotePool:    batch.CounterPoolSize,
+			E6ScaledPrice: scale(batch.PoolSize, batch.CounterPoolSize),
+		},
+		{
+			LocalChainId:  mc.chainID + 1,
+			RemoteChainId: mc.chainID,
+			LocalPool:     batch.CounterPoolSize,
+			RemotePool:    batch.PoolSize,
+			E6ScaledPrice: scale(batch.CounterPoolSize, batch.PoolSize),
+		},
+	}
 }
 
 func (mc *mockChain) nonSigners(height uint64) fsm.NonSigners {

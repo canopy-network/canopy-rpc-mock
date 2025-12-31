@@ -192,12 +192,17 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 	mux.HandleFunc(dexPricePath, func(w http.ResponseWriter, r *http.Request) {
 		req := idHeightRequest{}
 		decodeBody(r, &req)
+		prices := mc.dexPricesAt(req.Height)
+		if prices == nil {
+			http.Error(w, "unknown height", http.StatusNotFound)
+			return
+		}
 		if req.ID == 0 {
-			writeJSON(w, http.StatusOK, mc.dexPrices)
+			writeJSON(w, http.StatusOK, prices)
 			return
 		}
 		filtered := []lib.DexPrice{}
-		for _, price := range mc.dexPrices {
+		for _, price := range prices {
 			if price.LocalChainId == req.ID {
 				filtered = append(filtered, price)
 			}

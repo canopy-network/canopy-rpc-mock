@@ -10,8 +10,8 @@ import (
 
 func main() {
 	var (
-		blockCount   = flag.Int("blocks", 25, "number of blocks to prebuild per chain")
-		numChains    = flag.Int("chains", 2, "number of chains to serve")
+		blockCount   = flag.Int("blocks", 50, "number of blocks to prebuild per chain")
+		numChains    = flag.Int("chains", 3, "number of chains to serve")
 		startPort    = flag.Int("start-port", 60000, "starting port for first chain")
 		startChainID = flag.Uint64("start-chain-id", 5, "starting chain ID")
 	)
