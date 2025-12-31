@@ -58,6 +58,29 @@ type dexRequest struct {
 	Points bool   `json:"points"`
 }
 
+func normalizeOrderBooks(src *lib.OrderBooks) *lib.OrderBooks {
+	if src == nil {
+		return nil
+	}
+	dst := &lib.OrderBooks{OrderBooks: make([]*lib.OrderBook, 0, len(src.OrderBooks))}
+	for _, book := range src.OrderBooks {
+		if book == nil {
+			continue
+		}
+		orders := make([]*lib.SellOrder, 0, len(book.Orders))
+		for _, order := range book.Orders {
+			if order == nil {
+				continue
+			}
+			clone := *order
+			clone.Committee = book.ChainId
+			orders = append(orders, &clone)
+		}
+		dst.OrderBooks = append(dst.OrderBooks, &lib.OrderBook{ChainId: book.ChainId, Orders: orders})
+	}
+	return dst
+}
+
 func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 	mux.HandleFunc(headPath, func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, &lib.HeightResult{Height: mc.latestHeight()})
@@ -157,7 +180,7 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 			http.Error(w, "unknown height", http.StatusNotFound)
 			return
 		}
-		target := state.OrderBooks
+		target := normalizeOrderBooks(state.OrderBooks)
 		if req.ID == 0 {
 			writeJSON(w, http.StatusOK, target)
 			return
