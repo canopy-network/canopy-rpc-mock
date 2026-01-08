@@ -865,6 +865,188 @@ func (mc *mockChain) doubleSigners(height uint64) []*lib.DoubleSigner {
 	return nil
 }
 
+// buildIndexerBlob creates an IndexerBlob for a specific height by marshaling all blockchain data
+func (mc *mockChain) buildIndexerBlob(height uint64) (*fsm.IndexerBlob, error) {
+	blob := &fsm.IndexerBlob{}
+
+	// 1. Block - marshal the BlockResult
+	if block, ok := mc.blocks[height]; ok && block != nil {
+		blockBytes, err := proto.Marshal(block)
+		if err != nil {
+			return nil, fmt.Errorf("marshal block at height %d: %w", height, err)
+		}
+		blob.Block = blockBytes
+	} else {
+		return nil, fmt.Errorf("block not found for height %d", height)
+	}
+
+	// 2. State-based data
+	state := mc.stateAt(height)
+	if state == nil {
+		return nil, fmt.Errorf("state not found for height %d", height)
+	}
+
+	// 3. Accounts - marshal each account
+	if state.Accounts != nil {
+		for _, acc := range state.Accounts {
+			accBytes, err := proto.Marshal(acc)
+			if err != nil {
+				return nil, fmt.Errorf("marshal account: %w", err)
+			}
+			blob.Accounts = append(blob.Accounts, accBytes)
+		}
+	}
+
+	// 4. Pools - marshal each pool
+	if state.Pools != nil {
+		for _, pool := range state.Pools {
+			poolBytes, err := proto.Marshal(pool)
+			if err != nil {
+				return nil, fmt.Errorf("marshal pool: %w", err)
+			}
+			blob.Pools = append(blob.Pools, poolBytes)
+		}
+	}
+
+	// 5. Validators - marshal each validator
+	if state.Validators != nil {
+		for _, val := range state.Validators {
+			valBytes, err := proto.Marshal(val)
+			if err != nil {
+				return nil, fmt.Errorf("marshal validator: %w", err)
+			}
+			blob.Validators = append(blob.Validators, valBytes)
+		}
+	}
+
+	// 6. DexPrices - marshal each price using lib.Marshal (DexPrice is now a protobuf type)
+	prices := mc.dexPricesAt(height)
+	for _, price := range prices {
+		priceBz, err := lib.Marshal(&price)
+		if err != nil {
+			return nil, fmt.Errorf("marshal dex price: %w", err)
+		}
+		blob.DexPrices = append(blob.DexPrices, priceBz)
+	}
+
+	// 7. NonSigners - marshal each non-signer
+	nonSigners := mc.nonSigners(height)
+	if nonSigners != nil {
+		for _, ns := range nonSigners {
+			nsBytes, err := proto.Marshal(ns)
+			if err != nil {
+				return nil, fmt.Errorf("marshal non-signer: %w", err)
+			}
+			blob.NonSigners = append(blob.NonSigners, nsBytes)
+		}
+	}
+
+	// 8. DoubleSigners - marshal each double-signer
+	doubleSigners := mc.doubleSigners(height)
+	if doubleSigners != nil {
+		for _, ds := range doubleSigners {
+			dsBytes, err := proto.Marshal(ds)
+			if err != nil {
+				return nil, fmt.Errorf("marshal double signer: %w", err)
+			}
+			blob.DoubleSigners = append(blob.DoubleSigners, dsBytes)
+		}
+	}
+
+	// 9. OrderBooks - marshal the order books
+	if state.OrderBooks != nil {
+		ordersBytes, err := proto.Marshal(state.OrderBooks)
+		if err != nil {
+			return nil, fmt.Errorf("marshal order books: %w", err)
+		}
+		blob.Orders = ordersBytes
+	}
+
+	// 10. Params - marshal the parameters
+	if mc.params != nil {
+		paramsBytes, err := proto.Marshal(mc.params)
+		if err != nil {
+			return nil, fmt.Errorf("marshal params: %w", err)
+		}
+		blob.Params = paramsBytes
+	}
+
+	// 11. DexBatches (locked) - marshal if exists
+	if batch, ok := mc.dexBatches[height]; ok && batch != nil {
+		batchBytes, err := proto.Marshal(batch)
+		if err != nil {
+			return nil, fmt.Errorf("marshal dex batch: %w", err)
+		}
+		blob.DexBatches = append(blob.DexBatches, batchBytes)
+	}
+
+	// 12. NextDexBatches - marshal if exists
+	if nextBatch, ok := mc.nextDexBatches[height]; ok && nextBatch != nil {
+		nextBatchBytes, err := proto.Marshal(nextBatch)
+		if err != nil {
+			return nil, fmt.Errorf("marshal next dex batch: %w", err)
+		}
+		blob.NextDexBatches = append(blob.NextDexBatches, nextBatchBytes)
+	}
+
+	// 13. CommitteesData - marshal the committees data
+	if mc.committees != nil {
+		committeeBytes, err := proto.Marshal(mc.committees)
+		if err != nil {
+			return nil, fmt.Errorf("marshal committees: %w", err)
+		}
+		blob.CommitteesData = committeeBytes
+	}
+
+	// 14. SubsidizedCommittees
+	blob.SubsidizedCommittees = mc.subsidizedCommittees
+
+	// 15. RetiredCommittees
+	if len(state.RetiredCommittees) > 0 {
+		blob.RetiredCommittees = state.RetiredCommittees
+	} else {
+		blob.RetiredCommittees = mc.retiredCommittees
+	}
+
+	// 16. Supply - marshal the supply
+	if state.Supply != nil {
+		supplyBytes, err := proto.Marshal(state.Supply)
+		if err != nil {
+			return nil, fmt.Errorf("marshal supply: %w", err)
+		}
+		blob.Supply = supplyBytes
+	}
+
+	return blob, nil
+}
+
+// buildIndexerBlobs creates an IndexerBlobs containing both current and previous height data
+func (mc *mockChain) buildIndexerBlobs(height uint64) (*fsm.IndexerBlobs, error) {
+	// Build current blob
+	current, err := mc.buildIndexerBlob(height)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build current blob: %w", err)
+	}
+
+	// Build previous blob (handle height 1 edge case)
+	var previous *fsm.IndexerBlob
+	if height > 1 {
+		prev, err := mc.buildIndexerBlob(height - 1)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build previous blob: %w", err)
+		}
+		previous = prev
+	} else {
+		// For height 1, previous is an empty blob
+		previous = &fsm.IndexerBlob{}
+	}
+
+	return &fsm.IndexerBlobs{
+		Current:  current,
+		Previous: previous,
+	}, nil
+}
+
 func blockHash(height uint64) []byte {
 	if height == 0 {
 		return make([]byte, sha256.Size)

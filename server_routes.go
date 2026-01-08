@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/canopy-network/canopy/fsm"
 	"github.com/canopy-network/canopy/lib"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -37,6 +39,7 @@ const (
 	committeesDataPath       = "/v1/query/committees-data"
 	subsidizedCommitteesPath = "/v1/query/subsidized-committees"
 	retiredCommitteesPath    = "/v1/query/retired-committees"
+	indexerBlobsPath         = "/v1/query/indexer-blobs"
 	pollPath                 = "/v1/gov/poll"
 	proposalsPath            = "/v1/gov/proposals"
 )
@@ -56,6 +59,10 @@ type dexRequest struct {
 	Height uint64 `json:"height"`
 	ID     uint64 `json:"id"`
 	Points bool   `json:"points"`
+}
+
+type indexerBlobsRequest struct {
+	Height uint64 `json:"height"`
 }
 
 func normalizeOrderBooks(src *lib.OrderBooks) *lib.OrderBooks {
@@ -357,6 +364,48 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 		writeJSON(w, http.StatusOK, mc.retiredCommittees)
 	})
 
+	mux.HandleFunc(indexerBlobsPath, func(w http.ResponseWriter, r *http.Request) {
+		// Only accept POST requests
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Parse request body
+		req := indexerBlobsRequest{}
+		decodeBody(r, &req)
+
+		// Default to latest height if not specified
+		if req.Height == 0 {
+			req.Height = mc.latestHeight()
+		}
+
+		// Validate height exists
+		if _, ok := mc.blocks[req.Height]; !ok {
+			http.Error(w, "unknown height", http.StatusNotFound)
+			return
+		}
+
+		// Build indexer blobs
+		blobs, err := mc.buildIndexerBlobs(req.Height)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to build indexer blobs: %v", err),
+				http.StatusInternalServerError)
+			return
+		}
+
+		// Marshal to protobuf bytes using proto.Marshal
+		data, err := proto.Marshal(blobs)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to marshal indexer blobs: %v", err),
+				http.StatusInternalServerError)
+			return
+		}
+
+		// Write protobuf response
+		writeProtobuf(w, http.StatusOK, data)
+	})
+
 	mux.HandleFunc(pollPath, func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, mc.poll)
 	})
@@ -397,6 +446,12 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(payload)
+}
+
+func writeProtobuf(w http.ResponseWriter, status int, data []byte) {
+	w.Header().Set("Content-Type", "application/x-protobuf")
+	w.WriteHeader(status)
+	_, _ = w.Write(data)
 }
 
 func paginate[T any](items []T, pageNumber, perPage int) ([]T, lib.PageParams, int) {
