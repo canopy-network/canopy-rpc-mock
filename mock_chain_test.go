@@ -59,10 +59,16 @@ func TestClosedFormTxCountMatchesGenerator(t *testing.T) {
 	}
 }
 
-func TestDelayedDexEvents(t *testing.T) {
-	mc := newMockChain(25, 1)
-	if len(mc.events[22]) == 0 {
-		t.Fatalf("expected dex events at height 22 after batch processing")
+func TestEventsOccurAtRealisticRate(t *testing.T) {
+	mc := newMockChain(200, 1)
+	totalEvents := 0
+	for h := uint64(1); h <= 200; h++ {
+		totalEvents += len(mc.events[h])
+	}
+	// busy profile events run on their own ~1.5/block mean cadence (Task 6) —
+	// a range assertion, not an exact count, per spec Section 11.
+	if totalEvents < 100 || totalEvents > 500 {
+		t.Fatalf("expected roughly 100-500 events over 200 busy blocks, got %d", totalEvents)
 	}
 }
 
