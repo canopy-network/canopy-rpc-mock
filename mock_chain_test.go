@@ -3,6 +3,10 @@ package main
 import (
 	"encoding/hex"
 	"testing"
+
+	"github.com/canopy-network/canopy/fsm"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 )
 
 // sanity check that the mock chain prebuilds deterministic data for each height
@@ -111,5 +115,86 @@ func TestSnapshotStateParity(t *testing.T) {
 	}
 	if !foundNonSigners {
 		t.Fatalf("expected at least one height with populated NonSigners")
+	}
+}
+
+// TestCertificateBuiltAfterDexBatchAndState verifies that the cert-building
+// ordering fix landed: buildCertificateForTx(height) reads mc.dexBatches[height]
+// and mc.doubleSigners(height) (which reads mc.states[height]) — both must
+// already be populated for that height by the time the cert is built, since
+// generateDexBatch/snapshotStateAt happen earlier in the same loop iteration.
+func TestCertificateBuiltAfterDexBatchAndState(t *testing.T) {
+	mc := newMockChain(35, 1)
+
+	for _, h := range []uint64{5, 30} {
+		cert := mc.certs[h]
+		if cert == nil || cert.Results == nil {
+			t.Fatalf("height %d: missing certificate/results", h)
+		}
+
+		wantBatch := mc.dexBatches[h]
+		if wantBatch == nil {
+			t.Fatalf("height %d: expected non-nil dexBatches entry", h)
+		}
+		if cert.Results.DexBatch != wantBatch {
+			t.Fatalf("height %d: cert.Results.DexBatch does not match mc.dexBatches[h] — cert was built before dexBatches was set", h)
+		}
+
+		wantDoubleSigners := mc.doubleSigners(h)
+		gotDoubleSigners := cert.Results.SlashRecipients.DoubleSigners
+		if len(gotDoubleSigners) != len(wantDoubleSigners) {
+			t.Fatalf("height %d: cert DoubleSigners len=%d, mc.doubleSigners(h) len=%d — cert was built before states was set", h, len(gotDoubleSigners), len(wantDoubleSigners))
+		}
+	}
+}
+
+// TestGenesisStateAtHeightZero verifies the height-0 genesis state fix:
+// mc.states[0] must be populated (so an explicit {"height":0} query resolves
+// instead of 404ing), and its DoubleSigners computation must not underflow
+// the uint64 height-1 subtraction.
+func TestGenesisStateAtHeightZero(t *testing.T) {
+	mc := newMockChain(10, 1)
+
+	state := mc.states[0]
+	if state == nil {
+		t.Fatalf("expected mc.states[0] to be non-nil (genesis state)")
+	}
+	if len(state.DoubleSigners) != 0 {
+		t.Fatalf("expected no DoubleSigners at height 0, got %v", state.DoubleSigners)
+	}
+	if state.Accounts == nil {
+		t.Fatalf("expected genesis state to have accounts populated")
+	}
+	if state.Validators == nil {
+		t.Fatalf("expected genesis state to have validators populated")
+	}
+}
+
+// TestGeneratedTxHasRealMsgPayload verifies that generated txs carry a real,
+// non-nil, decodable Transaction.Msg payload rather than an empty *anypb.Any.
+func TestGeneratedTxHasRealMsgPayload(t *testing.T) {
+	mc := newMockChain(50, 1)
+
+	found := false
+	for h := uint64(1); h <= 50; h++ {
+		for _, res := range mc.txs[h] {
+			if res.MessageType != fsm.MessageSendName {
+				continue
+			}
+			if res.Transaction == nil || res.Transaction.Msg == nil {
+				t.Fatalf("height %d: send tx has nil Transaction.Msg", h)
+			}
+			msg := new(fsm.MessageSend)
+			if err := anypb.UnmarshalTo(res.Transaction.Msg, msg, proto.UnmarshalOptions{}); err != nil {
+				t.Fatalf("height %d: failed to unmarshal MessageSend: %v", h, err)
+			}
+			if len(msg.FromAddress) == 0 || len(msg.ToAddress) == 0 || msg.Amount == 0 {
+				t.Fatalf("height %d: decoded MessageSend has empty/zero fields: %+v", h, msg)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected at least one 'send' tx across heights 1-50")
 	}
 }

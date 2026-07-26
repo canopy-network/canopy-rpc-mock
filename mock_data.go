@@ -13,6 +13,8 @@ import (
 	"github.com/canopy-network/canopy/fsm"
 	"github.com/canopy-network/canopy/lib"
 	"github.com/canopy-network/canopy/lib/crypto"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 )
 
 const (
@@ -76,6 +78,7 @@ func newMockChain(numBlocks int, chainID uint64) *mockChain {
 		addrs[i] = a.Address
 	}
 	mc.lockedBatch = mc.generateDexBatch(0, false, nil, nil, nil)
+	mc.states[0] = mc.snapshotStateAt(addrs, 0)
 	for h := 1; h <= numBlocks; h++ {
 		height := uint64(h)
 		txResults := mc.generateClosedFormTxs(height, profile)
@@ -86,10 +89,10 @@ func newMockChain(numBlocks int, chainID uint64) *mockChain {
 
 		block := mc.generateBlock(height, txResults, events)
 		mc.blocks[height] = block
-		mc.certs[height] = mc.buildCertificateForTx(height)
 		mc.dexBatches[height] = mc.lockedBatch
 		mc.nextDexBatches[height] = mc.generateDexBatch(height, true, nil, nil, nil)
 		mc.states[height] = mc.snapshotStateAt(addrs, height)
+		mc.certs[height] = mc.buildCertificateForTx(height)
 	}
 
 	return mc
@@ -310,14 +313,19 @@ func (mc *mockChain) generateClosedFormTxs(height uint64, profile chainProfile) 
 		typeLabel := txTypeMixAt(mc.chainID, profile, height+uint64(i)*1_000_003) // distinct salt per slot
 		idx := pickAccountIndex(addrHeightSeed(mc.accounts[0].Address, height+uint64(i)), len(mc.accounts))
 		sender := mc.accounts[idx].Address
+		recipientIdx := pickAccountIndex(addrHeightSeed(mc.accounts[0].Address, height+uint64(i)+1), len(mc.accounts))
+		recipient := mc.accounts[recipientIdx].Address
 		txHash := hashBytes("tx", mc.chainID, height, i)
+		msgType := messageTypeForLabel(typeLabel)
+		anyMsg := mc.buildTxMsg(typeLabel, sender, recipient, height)
 		results = append(results, &lib.TxResult{
 			Sender:      sender,
-			MessageType: messageTypeForLabel(typeLabel),
+			MessageType: msgType,
 			Height:      height,
 			Index:       uint64(i),
 			Transaction: &lib.Transaction{
-				MessageType:   messageTypeForLabel(typeLabel),
+				MessageType:   msgType,
+				Msg:           anyMsg,
 				CreatedHeight: height,
 				Time:          uint64(blockTimeMicro(height)),
 				Fee:           10,
@@ -328,6 +336,61 @@ func (mc *mockChain) generateClosedFormTxs(height uint64, profile chainProfile) 
 		})
 	}
 	return results
+}
+
+// buildTxMsg constructs a minimal-but-real fsm message for the given
+// txTypeMixAt label and packs it into an *anypb.Any for Transaction.Msg.
+// Field values are placeholders (not statistically calibrated) — the goal
+// is a valid, non-empty, decodable payload, not realistic message content.
+func (mc *mockChain) buildTxMsg(label string, sender, recipient []byte, height uint64) *anypb.Any {
+	var msg proto.Message
+	switch label {
+	case "send":
+		msg = &fsm.MessageSend{FromAddress: sender, ToAddress: recipient, Amount: 1_000 + height}
+	case "dexLimitOrder":
+		msg = &fsm.MessageDexLimitOrder{
+			ChainId:         mc.chainID,
+			AmountForSale:   2_500,
+			RequestedAmount: 200,
+			Address:         sender,
+		}
+	case "editStake":
+		msg = &fsm.MessageEditStake{
+			Address:       sender,
+			Amount:        10_000 + height,
+			Committees:    []uint64{mc.chainID},
+			NetAddress:    fmt.Sprintf("127.0.0.1:%d", 26650),
+			OutputAddress: sender,
+			Compound:      false,
+			Signer:        sender,
+		}
+	case "certResults":
+		msg = &fsm.MessageCertificateResults{Qc: mc.buildCertificateForTx(height)}
+	case "dexLiqDeposit":
+		msg = &fsm.MessageDexLiquidityDeposit{ChainId: mc.chainID, Amount: 4_000, Address: sender}
+	case "dexLiqWithdraw":
+		msg = &fsm.MessageDexLiquidityWithdraw{ChainId: mc.chainID, Percent: 10, Address: sender}
+	case "stake":
+		msg = &fsm.MessageStake{
+			PublicKey:     sender,
+			Amount:        10_000,
+			Committees:    []uint64{mc.chainID},
+			NetAddress:    fmt.Sprintf("127.0.0.1:%d", 26650),
+			OutputAddress: sender,
+			Delegate:      false,
+			Compound:      false,
+			Signer:        sender,
+		}
+	case "unstake":
+		msg = &fsm.MessageUnstake{Address: sender}
+	default:
+		msg = &fsm.MessageSend{FromAddress: sender, ToAddress: recipient, Amount: 1_000 + height}
+	}
+	anyMsg, err := anypb.New(msg)
+	if err != nil {
+		return nil
+	}
+	return anyMsg
 }
 
 // messageTypeForLabel maps the txTypeMixAt() weighted labels onto real fsm
@@ -424,7 +487,7 @@ func (mc *mockChain) snapshotStateAt(addrs [][]byte, height uint64) *fsm.Genesis
 	}
 
 	var doubleSigners []*lib.DoubleSigner
-	if height%30 == 0 && len(mc.validators) >= 2 {
+	if height > 0 && height%30 == 0 && len(mc.validators) >= 2 {
 		doubleSigners = []*lib.DoubleSigner{{Id: mc.validators[1].Address, Heights: []uint64{height - 1, height}}}
 	}
 
