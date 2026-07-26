@@ -1,0 +1,8 @@
+.git
+.gitignore
+.superpowers
+canopy-rpc-mock
+README.md
+required.md
+CLAUDE.md
+*.md

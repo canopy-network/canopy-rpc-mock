@@ -12,8 +12,8 @@ RUN apk add --no-cache git make
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source code
-COPY *.go ./
+# Copy source code and all package subdirectories
+COPY . .
 
 # Build the binary
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-w -s" -o canopy-rpc-mock .
