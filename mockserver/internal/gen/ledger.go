@@ -47,6 +47,20 @@ func addrActiveAtHeight(addr []byte, height uint64) bool {
 const (
 	baseSupply    = 1_400_000_000.0 // ~sum of chain_1's measured account total + staked, spec Section "Real-world grounding"
 	inflationRate = 0.0000005       // per-block growth, tiny and monotonic
+
+	// supplyStepBlocks quantizes the height used for the inflation calculation
+	// so TotalSupplyAt (and therefore SnapshotBalancesAt's renormalization
+	// divisor) is IDENTICAL across a whole window of consecutive heights,
+	// rather than changing every single block. SnapshotBalancesAt normalizes
+	// every balance as total*raw_i/sum, so if `total` moves every height, an
+	// inactive account's normalized balance moves every height too — even
+	// though addrActiveAtHeight only perturbs the noise on ~2% of addresses.
+	// Quantizing the height fixes `total` (and thus raw_i/sum's scale) for
+	// supplyStepBlocks consecutive heights, so an untouched account's
+	// normalized balance is now genuinely byte-identical across that window,
+	// which is what makes delta-sparsification (Task 18) actually trim
+	// anything. Supply still grows monotonically overall, just in steps.
+	supplyStepBlocks = 100
 )
 
 func TotalSupplyAt(chainID uint64, height uint64) uint64 {
@@ -54,7 +68,8 @@ func TotalSupplyAt(chainID uint64, height uint64) uint64 {
 	if chainID != 1 {
 		scale = 0.05 // appchains have far fewer accounts/smaller supply (spec table)
 	}
-	return uint64(baseSupply * scale * (1 + inflationRate*float64(height)))
+	quantizedHeight := (height / supplyStepBlocks) * supplyStepBlocks
+	return uint64(baseSupply * scale * (1 + inflationRate*float64(quantizedHeight)))
 }
 
 // BalanceAt normalizes addr's rawValue against the full address set's raw
@@ -95,7 +110,22 @@ func SnapshotBalancesAt(addrs [][]byte, chainID uint64, height uint64) []uint64 
 
 // StakeAt mirrors rawValue/BalanceAt but scoped to the validator set, using a
 // separate log-normal fit — stakes and balances are different distributions.
-var stakeMu, stakeSigma = fitLogNormal(500_000, 931_000, 1_510_000_000) // chain_100/101 mean stake as rough anchors
+//
+// The original p75 anchor here (1_510_000_000) was ~1622x the median
+// (931_000) — almost certainly a data-entry error where a total-staked or
+// max-stake figure got used where a real p75 percentile was needed. That
+// blew sigma out to ~5.94 (vs. the balance fit's sane ~2.22), which in
+// practice meant a single validator could hold ~25% of Supply.Total among
+// just 10 validators, and risked uint64-overflow-adjacent sums at `load`
+// scale (5000 validators).
+//
+// With no better staging data available for stake percentiles, this is a
+// deliberate recalibration (not a redesign): pick a p75 anchor that's a
+// plausible multiple of the median (10x, vs. the balance fit's ~4.5x
+// p75/median ratio of 398_000_000/87_900_000) — this keeps p25 unchanged
+// and lands sigma at ~2.17, right in the balance fit's ~2.22 neighborhood,
+// instead of the original's degenerate ~5.94.
+var stakeMu, stakeSigma = fitLogNormal(500_000, 931_000, 931_000*10) // p75 ~10x median -> sigma ~2.17, in line with the balance fit's ~2.22
 
 func StakeAt(addr []byte, chainID uint64, height uint64) uint64 {
 	rng := RngForAddrHeight(append(append([]byte{}, addr...), byte(chainID)), height)

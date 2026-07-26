@@ -312,7 +312,7 @@ func (mc *mockChain) generateClosedFormTxs(height uint64, profile gen.Profile) [
 	count := gen.TxCountAt(mc.chainID, profile, height)
 	results := make([]*lib.TxResult, 0, count)
 	for i := 0; i < count; i++ {
-		typeLabel := gen.TxTypeMixAt(mc.chainID, profile, height+uint64(i)*1_000_003) // distinct salt per slot
+		typeLabel := gen.TxTypeMixAt(mc.chainID, profile, height+uint64(i+1)*1_000_003) // distinct salt per slot; i+1 avoids colliding with TxCountAt's zero-salt seed at i=0
 		idx := gen.PickAccountIndex(gen.AddrHeightSeed(mc.accounts[0].Address, height+uint64(i)), len(mc.accounts))
 		sender := mc.accounts[idx].Address
 		recipientIdx := gen.PickAccountIndex(gen.AddrHeightSeed(mc.accounts[0].Address, height+uint64(i)+1), len(mc.accounts))
@@ -426,7 +426,7 @@ func (mc *mockChain) generateClosedFormEvents(height uint64, profile gen.Profile
 	events := make([]*lib.Event, 0, count)
 	bh := blockHash(height)
 	for i := 0; i < count; i++ {
-		label := gen.EventTypeMixAt(mc.chainID, profile, height+uint64(i)*1_000_003)
+		label := gen.EventTypeMixAt(mc.chainID, profile, height+uint64(i+1)*1_000_003) // distinct salt per slot; i+1 avoids colliding with EventCountAt's zero-salt seed at i=0
 		idx := gen.PickAccountIndex(gen.AddrHeightSeed(mc.accounts[0].Address, height+uint64(i)), len(mc.accounts))
 		addr := mc.accounts[idx].Address
 		events = append(events, buildClosedFormEvent(label, height, mc.chainID, addr, bh)...)
@@ -462,17 +462,20 @@ func (mc *mockChain) snapshotStateAt(addrs [][]byte, height uint64) *fsm.Genesis
 		accounts[i] = &fsm.Account{Address: a, Amount: balances[i]}
 	}
 	validators := make([]*fsm.Validator, len(mc.validators))
+	var totalStaked uint64
 	for i, v := range mc.validators {
 		status := gen.ValidatorStatusAt(v.Address, 0, height)
 		unstakingHeight := uint64(0)
 		if status == gen.ValidatorUnstaked {
 			unstakingHeight = gen.UnstakeHeightFor(v.Address, 0)
 		}
+		stakeAt := gen.StakeAt(v.Address, mc.chainID, height)
+		totalStaked += stakeAt
 		validators[i] = &fsm.Validator{
 			Address:         v.Address,
 			PublicKey:       v.PublicKey,
 			NetAddress:      v.NetAddress,
-			StakedAmount:    gen.StakeAt(v.Address, mc.chainID, height),
+			StakedAmount:    stakeAt,
 			Committees:      v.Committees,
 			UnstakingHeight: unstakingHeight,
 			Output:          v.Output,
@@ -499,7 +502,7 @@ func (mc *mockChain) snapshotStateAt(addrs [][]byte, height uint64) *fsm.Genesis
 		Accounts:          accounts,
 		Validators:        validators,
 		Params:            mc.params,
-		Supply:            &fsm.Supply{Total: gen.TotalSupplyAt(mc.chainID, height)},
+		Supply:            &fsm.Supply{Total: gen.TotalSupplyAt(mc.chainID, height), Staked: totalStaked},
 		Committees:        mc.committees,
 		OrderBooks:        mc.orderBooks,
 		NonSigners:        nonSigners,
