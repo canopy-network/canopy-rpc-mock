@@ -61,3 +61,15 @@ func TestSampleCategoricalRespectsWeights(t *testing.T) {
 		t.Fatalf("expected ~9000 'a' draws, got %d", counts["a"])
 	}
 }
+
+func TestSampleCategoricalEmptyOptionsDoesNotPanic(t *testing.T) {
+	rng := rand.New(rand.NewSource(42))
+	result := sampleCategorical(rng, nil)
+	if result != "" {
+		t.Fatalf("expected empty string for nil options, got %q", result)
+	}
+	result = sampleCategorical(rng, []weightedOption{})
+	if result != "" {
+		t.Fatalf("expected empty string for empty options, got %q", result)
+	}
+}

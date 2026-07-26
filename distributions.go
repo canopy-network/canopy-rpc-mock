@@ -120,6 +120,9 @@ type weightedOption struct {
 
 // sampleCategorical draws one label with probability proportional to its weight.
 func sampleCategorical(rng *rand.Rand, options []weightedOption) string {
+	if len(options) == 0 {
+		return ""
+	}
 	total := 0.0
 	for _, o := range options {
 		total += o.weight
