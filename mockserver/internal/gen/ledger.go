@@ -19,11 +19,26 @@ func baseValue(addr []byte) float64 {
 // design (spec: modeling balance-distribution drift over time is out of
 // scope until measured/confirmed as significant) — the shape stays constant
 // across height, individual balances still vary height-to-height via noise.
+// Noise is gated behind addrActiveAtHeight so most addresses are unchanged
+// most heights, matching real ledger churn (most accounts don't transact
+// every block) — this is what gives fsm.DeltaIndexerBlobs something to trim.
 func rawValue(addr []byte, height uint64) float64 {
+	if !addrActiveAtHeight(addr, height) {
+		return baseValue(addr)
+	}
 	const sigma = 0.15
 	rng := RngForAddrHeight(addr, height)
 	noise := StandardNormal(rng)
 	return baseValue(addr) * math.Exp(sigma*noise)
+}
+
+// addrActiveAtHeight gives each address a small deterministic per-height
+// chance of being "touched" this block — most addresses are unchanged most
+// heights, matching real accounts_latest churn and making delta
+// sparsification meaningful.
+func addrActiveAtHeight(addr []byte, height uint64) bool {
+	rng := RngForAddrHeight(addr, height)
+	return rng.Float64() < 0.02
 }
 
 // TotalSupplyAt is a simple closed-form monotonic growth curve — deterministic,
