@@ -347,12 +347,17 @@ func (s *mockState) snapshot() *fsm.GenesisState {
 	}
 	pools := make([]*fsm.Pool, 0, len(s.pools))
 	for _, p := range s.pools {
-		clone := *p
+		clone := &fsm.Pool{
+			Id:              p.Id,
+			Amount:          p.Amount,
+			Points:          p.Points,
+			TotalPoolPoints: p.TotalPoolPoints,
+		}
 		if clone.Id != s.chainID+fsm.LiquidityPoolAddend {
 			clone.Points = nil
 			clone.TotalPoolPoints = 0
 		}
-		pools = append(pools, &clone)
+		pools = append(pools, clone)
 	}
 	orderBooks := &lib.OrderBooks{}
 	keys := make([]int, 0, len(s.orderBooks))

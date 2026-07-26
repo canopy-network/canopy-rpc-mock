@@ -10,7 +10,18 @@ import (
 
 	"github.com/canopy-network/canopy/fsm"
 	"github.com/canopy-network/canopy/lib"
+	"google.golang.org/protobuf/proto"
 )
+
+// simplePageResp matches the format expected by pgindexer's listPaged function
+type simplePageResp struct {
+	PageNumber int `json:"pageNumber"`
+	PerPage    int `json:"perPage"`
+	Results    any `json:"results"`
+	Count      int `json:"count"`
+	TotalPages int `json:"totalPages"`
+	TotalCount int `json:"totalCount"`
+}
 
 const (
 	headPath                 = "/v1/query/height"
@@ -72,9 +83,9 @@ func normalizeOrderBooks(src *lib.OrderBooks) *lib.OrderBooks {
 			if order == nil {
 				continue
 			}
-			clone := *order
+			clone := proto.Clone(order).(*lib.SellOrder)
 			clone.Committee = book.ChainId
-			orders = append(orders, &clone)
+			orders = append(orders, clone)
 		}
 		dst.OrderBooks = append(dst.OrderBooks, &lib.OrderBook{ChainId: book.ChainId, Orders: orders})
 	}
@@ -224,10 +235,10 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 			writeJSON(w, http.StatusOK, prices)
 			return
 		}
-		filtered := []lib.DexPrice{}
-		for _, price := range prices {
-			if price.LocalChainId == req.ID {
-				filtered = append(filtered, price)
+		filtered := []*lib.DexPrice{}
+		for i := range prices {
+			if prices[i].LocalChainId == req.ID {
+				filtered = append(filtered, &prices[i])
 			}
 		}
 		writeJSON(w, http.StatusOK, filtered)
@@ -244,7 +255,8 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 			return
 		}
 		if batch, ok := mc.dexBatches[req.Height]; ok {
-			writeJSON(w, http.StatusOK, batch)
+			// Return as array to match real API format
+			writeJSON(w, http.StatusOK, []*lib.DexBatch{batch})
 			return
 		}
 		http.Error(w, "unknown height", http.StatusNotFound)
@@ -261,7 +273,8 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 			return
 		}
 		if batch, ok := mc.nextDexBatches[req.Height]; ok {
-			writeJSON(w, http.StatusOK, batch)
+			// Return as array to match real API format
+			writeJSON(w, http.StatusOK, []*lib.DexBatch{batch})
 			return
 		}
 		http.Error(w, "unknown height", http.StatusNotFound)
@@ -319,7 +332,15 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 		if h == 0 {
 			h = mc.latestHeight()
 		}
-		writeJSON(w, http.StatusOK, mc.nonSigners(h))
+		results := mc.nonSigners(h)
+		writeJSON(w, http.StatusOK, simplePageResp{
+			PageNumber: 1,
+			PerPage:    100,
+			Results:    results,
+			Count:      len(results),
+			TotalPages: 1,
+			TotalCount: len(results),
+		})
 	})
 
 	mux.HandleFunc(doubleSignersPath, func(w http.ResponseWriter, r *http.Request) {
@@ -327,7 +348,15 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 		if h == 0 {
 			h = mc.latestHeight()
 		}
-		writeJSON(w, http.StatusOK, mc.doubleSigners(h))
+		results := mc.doubleSigners(h)
+		writeJSON(w, http.StatusOK, simplePageResp{
+			PageNumber: 1,
+			PerPage:    100,
+			Results:    results,
+			Count:      len(results),
+			TotalPages: 1,
+			TotalCount: len(results),
+		})
 	})
 
 	mux.HandleFunc(committeesDataPath, func(w http.ResponseWriter, _ *http.Request) {
