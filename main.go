@@ -13,9 +13,11 @@ func main() {
 		blockCount   = flag.Int("blocks", 50, "number of blocks to prebuild per chain")
 		numChains    = flag.Int("chains", 3, "number of chains to serve")
 		startPort    = flag.Int("start-port", 60000, "starting port for first chain")
-		startChainID = flag.Uint64("start-chain-id", 5, "starting chain ID")
+		startChainID = flag.Uint64("start-chain-id", 1, "starting chain ID")
+		profileFlag  = flag.String("profile", "default", "test profile: default|sparse|load")
 	)
 	flag.Parse()
+	_ = runModeConfig(runMode(*profileFlag)) // validated/used by newMockChain in Task 15's mockserver.New
 
 	chains := make([]*mockChain, 0, *numChains)
 	for i := 0; i < *numChains; i++ {
