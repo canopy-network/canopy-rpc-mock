@@ -47,20 +47,6 @@ func addrActiveAtHeight(addr []byte, height uint64) bool {
 const (
 	baseSupply    = 1_400_000_000.0 // ~sum of chain_1's measured account total + staked, spec Section "Real-world grounding"
 	inflationRate = 0.0000005       // per-block growth, tiny and monotonic
-
-	// supplyStepBlocks quantizes the height used for the inflation calculation
-	// so TotalSupplyAt (and therefore SnapshotBalancesAt's renormalization
-	// divisor) is IDENTICAL across a whole window of consecutive heights,
-	// rather than changing every single block. SnapshotBalancesAt normalizes
-	// every balance as total*raw_i/sum, so if `total` moves every height, an
-	// inactive account's normalized balance moves every height too — even
-	// though addrActiveAtHeight only perturbs the noise on ~2% of addresses.
-	// Quantizing the height fixes `total` (and thus raw_i/sum's scale) for
-	// supplyStepBlocks consecutive heights, so an untouched account's
-	// normalized balance is now genuinely byte-identical across that window,
-	// which is what makes delta-sparsification (Task 18) actually trim
-	// anything. Supply still grows monotonically overall, just in steps.
-	supplyStepBlocks = 100
 )
 
 func TotalSupplyAt(chainID uint64, height uint64) uint64 {
@@ -68,8 +54,7 @@ func TotalSupplyAt(chainID uint64, height uint64) uint64 {
 	if chainID != 1 {
 		scale = 0.05 // appchains have far fewer accounts/smaller supply (spec table)
 	}
-	quantizedHeight := (height / supplyStepBlocks) * supplyStepBlocks
-	return uint64(baseSupply * scale * (1 + inflationRate*float64(quantizedHeight)))
+	return uint64(baseSupply * scale * (1 + inflationRate*float64(height)))
 }
 
 // BalanceAt normalizes addr's rawValue against the full address set's raw
@@ -88,23 +73,116 @@ func BalanceAt(addr []byte, addrs [][]byte, chainID uint64, height uint64) uint6
 	return 0
 }
 
+// exchangeRate is the FIXED, height-independent raw-value-to-balance
+// conversion rate: TotalSupplyAt at genesis (height 0) divided by the sum of
+// every address's height-independent baseValue. It is deliberately NOT
+// recomputed from a live per-height sum of raw values — that was the root
+// cause of a bug where a single active account's noise moved every other
+// account's normalized balance too (renormalizing against a moving,
+// all-accounts sum couples every account to every other account's activity
+// that block, regardless of population size). Computing the rate once from
+// baseValue decouples them: an inactive account's balance now depends only
+// on its own (unchanged) raw value and this fixed rate, so it is genuinely
+// byte-identical across heights it wasn't touched in — at any account count,
+// not just small test populations. See SnapshotBalancesAt for how supply
+// growth/drift is reconciled without moving every other account's balance.
+func exchangeRate(addrs [][]byte, chainID uint64) float64 {
+	var sum float64
+	for _, a := range addrs {
+		sum += baseValue(a)
+	}
+	if sum == 0 {
+		return 0
+	}
+	return float64(TotalSupplyAt(chainID, 0)) / sum
+}
+
+// residualIndex picks the LARGEST-baseValue address as the residual/treasury
+// slot (deterministic, height-independent — computed purely from baseValue).
+// Removing the biggest holder from the "priced independently" set, rather
+// than an arbitrary position, maximizes the slack the residual has to absorb
+// other accounts' noise: at small account counts the balance distribution is
+// heavy-tailed enough that a single active account's noise can otherwise
+// swing the priced sum past TotalSupplyAt (observed: one whale's noise pushed
+// the sum ~40% over target when the residual was picked by position instead
+// of by size).
+func residualIndex(addrs [][]byte) int {
+	best, bestVal := 0, -1.0
+	for i, a := range addrs {
+		if v := baseValue(a); v > bestVal {
+			best, bestVal = i, v
+		}
+	}
+	return best
+}
+
 // SnapshotBalancesAt computes every address's balance at height in one pass —
 // O(numAccounts), independent of H, per spec Section 3.
+//
+// Every address except the residual (residualIndex) is priced at the fixed
+// exchangeRate against its own rawValue, independent of every other
+// address's activity that block — an inactive address's balance is therefore
+// byte-identical to the previous height's, which is what gives
+// fsm.DeltaIndexerBlobs something to trim (see delta_test.go). The residual
+// address's balance is whatever's left of TotalSupplyAt after the others are
+// priced, so conservation (sum == TotalSupplyAt) holds exactly by
+// construction rather than by rounding-tolerant renormalization. It absorbs
+// all inflation growth and all per-account noise drift, so it is expected to
+// look unlike a "real" account and to change most heights — that trade-off
+// is what makes every OTHER account's sparsification real.
+//
+// Fallback: on the rare height where the OTHER accounts' combined noise still
+// pushes their priced sum above TotalSupplyAt (despite the residual being the
+// largest holder), every non-residual balance is scaled down proportionally
+// so the total still lands on TotalSupplyAt exactly — conservation is never
+// allowed to break, even though this one height briefly re-couples every
+// account to every other's activity, same as the design this replaced.
 func SnapshotBalancesAt(addrs [][]byte, chainID uint64, height uint64) []uint64 {
-	raws := make([]float64, len(addrs))
-	sum := 0.0
-	for i, a := range addrs {
-		raws[i] = rawValue(a, height)
-		sum += raws[i]
+	if len(addrs) == 0 {
+		return nil
 	}
-	total := float64(TotalSupplyAt(chainID, height))
 	out := make([]uint64, len(addrs))
-	if sum == 0 {
+	if len(addrs) == 1 {
+		// single-address chain: nothing else to price, the one address just
+		// gets the full supply.
+		out[0] = TotalSupplyAt(chainID, height)
 		return out
 	}
-	for i, r := range raws {
-		out[i] = uint64(total * r / sum)
+	residual := residualIndex(addrs)
+	rate := exchangeRate(addrs, chainID)
+	raws := make([]float64, len(addrs))
+	var sumOthers float64
+	for i, a := range addrs {
+		if i == residual {
+			continue
+		}
+		raws[i] = rawValue(a, height) * rate
+		sumOthers += raws[i]
 	}
+	total := float64(TotalSupplyAt(chainID, height))
+	if sumOthers > total {
+		// Extremely rare: scale every non-residual balance down
+		// proportionally so conservation still holds exactly this height.
+		scale := total / sumOthers
+		for i := range addrs {
+			if i != residual {
+				out[i] = uint64(raws[i] * scale)
+			}
+		}
+		return out
+	}
+	for i := range addrs {
+		if i != residual {
+			out[i] = uint64(raws[i])
+		}
+	}
+	var sum uint64
+	for i, v := range out {
+		if i != residual {
+			sum += v
+		}
+	}
+	out[residual] = TotalSupplyAt(chainID, height) - sum
 	return out
 }
 

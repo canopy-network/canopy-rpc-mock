@@ -12,21 +12,27 @@ import (
 // heights would have failed an "after < before" check if swept (see Fix 2 in
 // the final review).
 //
-// The test's test chain only has 10 accounts (one per hardcoded validator
-// seed), so at that population size a single active account's noise
-// (addrActiveAtHeight gates ~2% of addresses per height, sigma=0.15) can
-// still shift the renormalization sum enough to flip several other
-// accounts' rounded uint64 balances — a small-N artifact that wouldn't
-// happen on a real chain with hundreds/thousands of accounts. That means a
-// strict per-height "did at least one account get trimmed" check is noisy at
-// n=10 and doesn't reliably distinguish fixed-vs-broken behavior here.
-// Instead, this asserts on the AGGREGATE fraction of accounts trimmed across
-// the whole sweep, which is the metric the review itself used to characterize
-// the bug ("unchanged-account counts range 0-30% ... not the intended
-// ~98%"): pre-fix (TotalSupplyAt changing every block) this ran ~12% trimmed
-// on this test chain; post-fix (TotalSupplyAt quantized to a stable 100-block
-// window) it runs ~55-65%. 50% is comfortably below the fixed behavior and
-// comfortably above the broken one, so it can't pass by luck.
+// The original fix attempt (quantizing TotalSupplyAt to a stable window)
+// only worked at this test's small n=10 account population — it didn't fix
+// the actual root cause, which was gen.SnapshotBalancesAt renormalizing
+// every account's balance against a LIVE sum of all accounts' raw values.
+// Any single active account moved that sum, and therefore every other
+// account's balance too, regardless of how many accounts existed (verified:
+// at n>=100 the unchanged fraction collapsed to ~1%, since with more
+// accounts almost every block has some active account). The real fix
+// (gen.SnapshotBalancesAt / gen.exchangeRate) prices every account except a
+// designated residual/treasury slot at a FIXED, height-independent exchange
+// rate, so an inactive account's balance no longer depends on any other
+// account's activity that block, at any population size — verified directly
+// at n=10/100/1000/5000, all landing in the 84-96% unchanged range.
+//
+// This asserts on the AGGREGATE fraction of accounts trimmed across the
+// whole sweep (not a strict per-height check, which is noisy at n=10 — a
+// single active account can still flip a couple of neighbors' rounded
+// uint64 balances via the residual's leftover-supply calculation). 50% is
+// comfortably below the ~12% the broken renormalization produced and
+// comfortably below the ~84%+ the fixed design produces, so it can't pass by
+// luck.
 func TestDeltaSparsificationOnlyKeepsChangedAccounts(t *testing.T) {
 	mc := newMockChain(30, 1)
 
