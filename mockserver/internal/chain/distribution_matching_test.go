@@ -1,8 +1,10 @@
 // distribution_matching_test.go
-package main
+package chain
 
 import (
 	"testing"
+
+	"github.com/canopy-network/canopy-rpc-mock/mockserver/internal/gen"
 )
 
 // TestDistributionMatchesCalibratedTargets generates a full 24h-equivalent
@@ -48,7 +50,7 @@ func TestDistributionMatchesCalibratedTargets(t *testing.T) {
 	hourlyTotals := make([]int, 24)
 	hourlyBlocks := make([]int, 24)
 	for h := uint64(1); h <= heights; h++ {
-		hour := hourOfHeight(h)
+		hour := gen.HourOfHeight(h)
 		hourlyTotals[hour] += len(mc.txs[h])
 		hourlyBlocks[hour]++
 	}

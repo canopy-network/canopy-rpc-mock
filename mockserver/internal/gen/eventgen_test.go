@@ -1,12 +1,12 @@
 // eventgen_test.go
-package main
+package gen
 
 import "testing"
 
 func TestEventTypeMixAtBusyIsRewardLed(t *testing.T) {
 	counts := map[string]int{}
 	for h := uint64(1); h <= 5000; h++ {
-		counts[eventTypeMixAt(1, profileBusy, h)]++
+		counts[EventTypeMixAt(1, ProfileBusy, h)]++
 	}
 	if counts["reward"] <= counts["dexSwap"] {
 		t.Fatalf("expected busy profile reward-led, got reward=%d dexSwap=%d", counts["reward"], counts["dexSwap"])
@@ -16,7 +16,7 @@ func TestEventTypeMixAtBusyIsRewardLed(t *testing.T) {
 func TestEventTypeMixAtQuietIsDexSwapLed(t *testing.T) {
 	counts := map[string]int{}
 	for h := uint64(1); h <= 5000; h++ {
-		counts[eventTypeMixAt(100, profileQuiet, h)]++
+		counts[EventTypeMixAt(100, ProfileQuiet, h)]++
 	}
 	if counts["dexSwap"] <= counts["reward"] {
 		t.Fatalf("expected quiet profile dex-swap-led, got reward=%d dexSwap=%d", counts["reward"], counts["dexSwap"])
@@ -32,7 +32,7 @@ func TestEventCountAtMatchesProfileMean(t *testing.T) {
 	busySum := 0
 	const n = 5000
 	for h := uint64(1); h <= n; h++ {
-		busySum += eventCountAt(1, profileBusy, h)
+		busySum += EventCountAt(1, ProfileBusy, h)
 	}
 	busyGot := float64(busySum) / float64(n)
 	if busyGot < busyLowerBound || busyGot > busyUpperBound {
@@ -47,7 +47,7 @@ func TestEventCountAtMatchesProfileMean(t *testing.T) {
 
 	quietSum := 0
 	for h := uint64(1); h <= n; h++ {
-		quietSum += eventCountAt(100, profileQuiet, h)
+		quietSum += EventCountAt(100, ProfileQuiet, h)
 	}
 	quietGot := float64(quietSum) / float64(n)
 	if quietGot < quietLowerBound || quietGot > quietUpperBound {

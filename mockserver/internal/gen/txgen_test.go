@@ -1,11 +1,11 @@
 // txgen_test.go
-package main
+package gen
 
 import "testing"
 
 func TestTxCountAtIsDeterministic(t *testing.T) {
-	a := txCountAt(1, profileBusy, 12345)
-	b := txCountAt(1, profileBusy, 12345)
+	a := TxCountAt(1, ProfileBusy, 12345)
+	b := TxCountAt(1, ProfileBusy, 12345)
 	if a != b {
 		t.Fatalf("expected deterministic tx count, got %d vs %d", a, b)
 	}
@@ -13,7 +13,7 @@ func TestTxCountAtIsDeterministic(t *testing.T) {
 
 func TestTxCountAtBusyNeverZero(t *testing.T) {
 	for h := uint64(1); h <= 500; h++ {
-		if txCountAt(1, profileBusy, h) == 0 {
+		if TxCountAt(1, ProfileBusy, h) == 0 {
 			t.Fatalf("busy profile produced zero txs at height %d", h)
 		}
 	}
@@ -23,7 +23,7 @@ func TestTxCountAtQuietOftenZero(t *testing.T) {
 	zeros := 0
 	const n = 5000
 	for h := uint64(1); h <= n; h++ {
-		if txCountAt(100, profileQuiet, h) == 0 {
+		if TxCountAt(100, ProfileQuiet, h) == 0 {
 			zeros++
 		}
 	}
@@ -34,8 +34,8 @@ func TestTxCountAtQuietOftenZero(t *testing.T) {
 }
 
 func TestTxTypeMixAtIsDeterministic(t *testing.T) {
-	a := txTypeMixAt(1, profileBusy, 42)
-	b := txTypeMixAt(1, profileBusy, 42)
+	a := TxTypeMixAt(1, ProfileBusy, 42)
+	b := TxTypeMixAt(1, ProfileBusy, 42)
 	if a != b {
 		t.Fatalf("expected deterministic tx type, got %q vs %q", a, b)
 	}

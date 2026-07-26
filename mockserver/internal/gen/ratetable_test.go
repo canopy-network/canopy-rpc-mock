@@ -1,5 +1,5 @@
 // ratetable_test.go
-package main
+package gen
 
 import (
 	"math"

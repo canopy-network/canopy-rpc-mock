@@ -1,25 +1,25 @@
 // profile.go
-package main
+package gen
 
-type chainProfile int
+type Profile int
 
 const (
-	profileBusy chainProfile = iota
-	profileQuiet
+	ProfileBusy Profile = iota
+	ProfileQuiet
 )
 
-// profileForChain assigns busy/root to chain ID 1 and quiet/appchain to every
+// ProfileForChain assigns busy/root to chain ID 1 and quiet/appchain to every
 // other chain ID, per spec Section 2 — automatic by chain ID, no per-chain config.
-func profileForChain(chainID uint64) chainProfile {
+func ProfileForChain(chainID uint64) Profile {
 	if chainID == 1 {
-		return profileBusy
+		return ProfileBusy
 	}
-	return profileQuiet
+	return ProfileQuiet
 }
 
-// profileParams holds the per-profile tunable constants from spec Section 4,
+// ProfileParams holds the per-profile tunable constants from spec Section 4,
 // fit to the 24h staging aggregate (see docs/superpowers/specs/2026-07-26-realistic-mock-data-design.md).
-type profileParams struct {
+type ProfileParams struct {
 	// txCountR is the negative-binomial dispersion parameter. Chosen as a
 	// starting point (not solved from measured variance — the spec table only
 	// gives min/max/mean/median, not variance); the distribution-matching test
@@ -30,7 +30,7 @@ type profileParams struct {
 	txTypeWeights []weightedOption
 }
 
-var busyParams = profileParams{
+var busyParams = ProfileParams{
 	txCountR:     8,
 	txCountMean:  91.69,
 	zeroTxChance: 0, // busy profile is never zero (spec Section 4)
@@ -46,7 +46,7 @@ var busyParams = profileParams{
 	},
 }
 
-var quietParams = profileParams{
+var quietParams = ProfileParams{
 	txCountR:     4,
 	txCountMean:  0.8, // ~avg of chain_100 (0.80) and chain_101 (0.76)
 	zeroTxChance: 0.54,
@@ -57,8 +57,8 @@ var quietParams = profileParams{
 	},
 }
 
-func paramsForProfile(p chainProfile) profileParams {
-	if p == profileBusy {
+func ParamsForProfile(p Profile) ProfileParams {
+	if p == ProfileBusy {
 		return busyParams
 	}
 	return quietParams

@@ -1,9 +1,10 @@
-package main
+package chain
 
 import (
 	"encoding/hex"
 	"testing"
 
+	"github.com/canopy-network/canopy-rpc-mock/mockserver/internal/gen"
 	"github.com/canopy-network/canopy/fsm"
 	"github.com/canopy-network/canopy/lib"
 	"google.golang.org/protobuf/proto"
@@ -51,7 +52,7 @@ func TestAccountsFromValidatorKeys(t *testing.T) {
 func TestClosedFormTxCountMatchesGenerator(t *testing.T) {
 	mc := newMockChain(50, 1)
 	for h := uint64(1); h <= 50; h++ {
-		want := txCountAt(mc.chainID, profileForChain(mc.chainID), h)
+		want := gen.TxCountAt(mc.chainID, gen.ProfileForChain(mc.chainID), h)
 		got := len(mc.txs[h])
 		if got != want {
 			t.Fatalf("height %d: block has %d txs, generator says %d", h, got, want)

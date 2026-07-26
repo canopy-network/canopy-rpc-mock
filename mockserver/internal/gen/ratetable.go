@@ -1,5 +1,5 @@
 // ratetable.go
-package main
+package gen
 
 // blocksPerHour is derived from Canopy's ~20s block time (3600/20).
 const blocksPerHour = 180
@@ -43,7 +43,11 @@ func normalizeRateTable(raw [24]float64) [24]float64 {
 	return out
 }
 
-func hourOfHeight(height uint64) int {
+// HourOfHeight is exported because internal/chain's test suite
+// (distribution_matching_test.go) buckets tx counts by hour to check the
+// diurnal calibration — it isn't reachable from within gen alone once tests
+// moved to a separate package.
+func HourOfHeight(height uint64) int {
 	return int((height / blocksPerHour) % 24)
 }
 
@@ -51,5 +55,5 @@ func hourOfHeight(height uint64) int {
 // Quiet profile does not call this (spec Section 5: appchain traffic looked
 // stationary across sample windows).
 func busyMeanAt(height uint64, baseMean float64) float64 {
-	return baseMean * busyHourlyRateRatio[hourOfHeight(height)]
+	return baseMean * busyHourlyRateRatio[HourOfHeight(height)]
 }

@@ -1,4 +1,4 @@
-package main
+package gen
 
 import "math"
 
@@ -9,9 +9,9 @@ var balanceMu, balanceSigma = fitLogNormal(20_000_000, 87_900_000, 398_000_000)
 
 // baseValue is the average per-account "raw" balance weight,
 // independent of height — the actual per-height balance is this raw value
-// renormalized against totalSupplyAt() for conservation.
+// renormalized against TotalSupplyAt() for conservation.
 func baseValue(addr []byte) float64 {
-	rng := rngForAddrHeight(addr, 0)
+	rng := RngForAddrHeight(addr, 0)
 	return sampleLogNormal(rng, balanceMu, balanceSigma)
 }
 
@@ -21,12 +21,12 @@ func baseValue(addr []byte) float64 {
 // across height, individual balances still vary height-to-height via noise.
 func rawValue(addr []byte, height uint64) float64 {
 	const sigma = 0.15
-	rng := rngForAddrHeight(addr, height)
-	noise := standardNormal(rng)
+	rng := RngForAddrHeight(addr, height)
+	noise := StandardNormal(rng)
 	return baseValue(addr) * math.Exp(sigma*noise)
 }
 
-// totalSupplyAt is a simple closed-form monotonic growth curve — deterministic,
+// TotalSupplyAt is a simple closed-form monotonic growth curve — deterministic,
 // O(1), no replay. inflationRate is a placeholder magnitude (not measured);
 // retune if the ledger-invariant test's supply-conservation check needs it.
 const (
@@ -34,7 +34,7 @@ const (
 	inflationRate = 0.0000005       // per-block growth, tiny and monotonic
 )
 
-func totalSupplyAt(chainID uint64, height uint64) uint64 {
+func TotalSupplyAt(chainID uint64, height uint64) uint64 {
 	scale := 1.0
 	if chainID != 1 {
 		scale = 0.05 // appchains have far fewer accounts/smaller supply (spec table)
@@ -42,14 +42,14 @@ func totalSupplyAt(chainID uint64, height uint64) uint64 {
 	return uint64(baseSupply * scale * (1 + inflationRate*float64(height)))
 }
 
-// balanceAt normalizes addr's rawValue against the full address set's raw
-// values so per-height balances always sum to totalSupplyAt (conservation by
+// BalanceAt normalizes addr's rawValue against the full address set's raw
+// values so per-height balances always sum to TotalSupplyAt (conservation by
 // construction, no ledger replay). Cost is O(len(addrs)) per call — callers
 // generating a whole snapshot should call rawValue once per addr and do the
-// division themselves rather than calling balanceAt in a loop (see
-// snapshotBalancesAt below for the O(n) batch form).
-func balanceAt(addr []byte, addrs [][]byte, chainID uint64, height uint64) uint64 {
-	balances := snapshotBalancesAt(addrs, chainID, height)
+// division themselves rather than calling BalanceAt in a loop (see
+// SnapshotBalancesAt below for the O(n) batch form).
+func BalanceAt(addr []byte, addrs [][]byte, chainID uint64, height uint64) uint64 {
+	balances := SnapshotBalancesAt(addrs, chainID, height)
 	for i, a := range addrs {
 		if string(a) == string(addr) {
 			return balances[i]
@@ -58,16 +58,16 @@ func balanceAt(addr []byte, addrs [][]byte, chainID uint64, height uint64) uint6
 	return 0
 }
 
-// snapshotBalancesAt computes every address's balance at height in one pass —
+// SnapshotBalancesAt computes every address's balance at height in one pass —
 // O(numAccounts), independent of H, per spec Section 3.
-func snapshotBalancesAt(addrs [][]byte, chainID uint64, height uint64) []uint64 {
+func SnapshotBalancesAt(addrs [][]byte, chainID uint64, height uint64) []uint64 {
 	raws := make([]float64, len(addrs))
 	sum := 0.0
 	for i, a := range addrs {
 		raws[i] = rawValue(a, height)
 		sum += raws[i]
 	}
-	total := float64(totalSupplyAt(chainID, height))
+	total := float64(TotalSupplyAt(chainID, height))
 	out := make([]uint64, len(addrs))
 	if sum == 0 {
 		return out
@@ -78,14 +78,14 @@ func snapshotBalancesAt(addrs [][]byte, chainID uint64, height uint64) []uint64 
 	return out
 }
 
-// stakeAt mirrors rawValue/balanceAt but scoped to the validator set, using a
+// StakeAt mirrors rawValue/BalanceAt but scoped to the validator set, using a
 // separate log-normal fit — stakes and balances are different distributions.
 var stakeMu, stakeSigma = fitLogNormal(500_000, 931_000, 1_510_000_000) // chain_100/101 mean stake as rough anchors
 
-func stakeAt(addr []byte, chainID uint64, height uint64) uint64 {
-	rng := rngForAddrHeight(append(append([]byte{}, addr...), byte(chainID)), height)
+func StakeAt(addr []byte, chainID uint64, height uint64) uint64 {
+	rng := RngForAddrHeight(append(append([]byte{}, addr...), byte(chainID)), height)
 	const sigma = 0.1
-	base := sampleLogNormal(rngForAddrHeight(addr, 0), stakeMu, stakeSigma)
-	noise := standardNormal(rng)
+	base := sampleLogNormal(RngForAddrHeight(addr, 0), stakeMu, stakeSigma)
+	noise := StandardNormal(rng)
 	return uint64(base * math.Exp(sigma*noise))
 }

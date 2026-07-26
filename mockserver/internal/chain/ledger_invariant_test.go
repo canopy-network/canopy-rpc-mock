@@ -1,7 +1,11 @@
 // ledger_invariant_test.go
-package main
+package chain
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/canopy-network/canopy-rpc-mock/mockserver/internal/gen"
+)
 
 func TestLedgerInvariantsHoldAcrossHeights(t *testing.T) {
 	mc := newMockChain(500, 1)
@@ -26,9 +30,9 @@ func TestLedgerInvariantsHoldAcrossHeights(t *testing.T) {
 			t.Fatalf("supply not conserved at height %d: total=%d sum(balances)=%d", h, state.Supply.Total, sumBalances)
 		}
 		for _, v := range state.Validators {
-			status := validatorStatusAt(v.Address, 0, h)
+			status := gen.ValidatorStatusAt(v.Address, 0, h)
 			isUnstaked := v.UnstakingHeight != 0
-			if (status == validatorUnstaked) != isUnstaked {
+			if (status == gen.ValidatorUnstaked) != isUnstaked {
 				t.Fatalf("height %d validator %x: lifecycle status disagreement", h, v.Address)
 			}
 		}

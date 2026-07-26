@@ -1,5 +1,5 @@
 // eventgen.go
-package main
+package gen
 
 // eventWeights holds the per-profile event-type mix (spec Section 4). Events
 // run on their own cadence, decoupled from tx volume (key finding 1) — busy
@@ -18,29 +18,29 @@ var quietEventWeights = []weightedOption{
 	{"dexLiquidityDeposit", 3.0},
 }
 
-func eventWeightsForProfile(p chainProfile) []weightedOption {
-	if p == profileBusy {
+func EventWeightsForProfile(p Profile) []weightedOption {
+	if p == ProfileBusy {
 		return busyEventWeights
 	}
 	return quietEventWeights
 }
 
-// eventTypeMixAt draws one event type for (chainID, height), independent of
+// EventTypeMixAt draws one event type for (chainID, height), independent of
 // that height's tx count/type (key finding 1 in the spec: dex-swap/reward
 // events run on their own protocol cadence, not "N events per tx").
-func eventTypeMixAt(chainID uint64, profile chainProfile, height uint64) string {
+func EventTypeMixAt(chainID uint64, profile Profile, height uint64) string {
 	// distinct seed component ("event") so this doesn't correlate with
-	// txCountAt/txTypeMixAt, which seed from the same (chainID, height) pair.
-	rng := rngForHeight(chainID^0x6576656e74, height) // xor tag == "event" ascii-ish salt
-	return sampleCategorical(rng, eventWeightsForProfile(profile))
+	// TxCountAt/TxTypeMixAt, which seed from the same (chainID, height) pair.
+	rng := RngForHeight(chainID^0x6576656e74, height) // xor tag == "event" ascii-ish salt
+	return sampleCategorical(rng, EventWeightsForProfile(profile))
 }
 
-// eventCountAt returns how many events fire at this height, on their own
-// per-height Poisson-ish cadence (not derived from txCountAt).
-func eventCountAt(chainID uint64, profile chainProfile, height uint64) int {
-	rng := rngForHeight(chainID^0x6576656e74, height)
+// EventCountAt returns how many events fire at this height, on their own
+// per-height Poisson-ish cadence (not derived from TxCountAt).
+func EventCountAt(chainID uint64, profile Profile, height uint64) int {
+	rng := RngForHeight(chainID^0x6576656e74, height)
 	mean := 1.5
-	if profile == profileQuiet {
+	if profile == ProfileQuiet {
 		mean = 0.6
 	}
 	return samplePoisson(rng, mean)

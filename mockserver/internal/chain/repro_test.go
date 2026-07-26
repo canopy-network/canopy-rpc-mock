@@ -1,22 +1,23 @@
-package main
+package chain
 
 import (
 	"testing"
 
+	"github.com/canopy-network/canopy-rpc-mock/mockserver/internal/gen"
 	"github.com/canopy-network/canopy/lib"
 )
 
 func TestReproDefaultProfileByteIdentical(t *testing.T) {
-	assertReproducible(t, runModeDefault)
+	assertReproducible(t, gen.RunModeDefault)
 }
 
 func TestReproLoadProfileByteIdentical(t *testing.T) {
-	assertReproducible(t, runModeLoad)
+	assertReproducible(t, gen.RunModeLoad)
 }
 
-func assertReproducible(t *testing.T, mode runMode) {
-	cfg := runModeConfig(mode)
-	for _, chainID := range cfg.chainIDs {
+func assertReproducible(t *testing.T, mode gen.RunMode) {
+	cfg := gen.RunModeConfig(mode)
+	for _, chainID := range cfg.ChainIDs {
 		mc1 := newMockChain(20, chainID)
 		mc2 := newMockChain(20, chainID)
 		for h := uint64(1); h <= 20; h++ {

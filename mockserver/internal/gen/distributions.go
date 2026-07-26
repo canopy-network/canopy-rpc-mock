@@ -1,36 +1,38 @@
 // distributions.go
-package main
+package gen
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"math"
 	"math/rand"
 )
 
-// heightSeed derives a deterministic uint64 seed from a base seed and a height,
-// reusing the existing hashBytes() helper (mock_data.go) for consistency with
-// blockHash()/hashBytes()-based determinism elsewhere in this package.
-func heightSeed(baseSeed, height uint64) uint64 {
-	sum := hashBytes(baseSeed, height)
+// HeightSeed derives a deterministic uint64 seed from a base seed and a height,
+// reusing the existing HashBytes() helper for consistency with
+// blockHash()/HashBytes()-based determinism elsewhere in this package.
+func HeightSeed(baseSeed, height uint64) uint64 {
+	sum := HashBytes(baseSeed, height)
 	return binary.BigEndian.Uint64(sum[:8])
 }
 
-// addrHeightSeed derives a deterministic seed from an address and a height.
-func addrHeightSeed(addr []byte, height uint64) uint64 {
-	sum := hashBytes(addr, height)
+// AddrHeightSeed derives a deterministic seed from an address and a height.
+func AddrHeightSeed(addr []byte, height uint64) uint64 {
+	sum := HashBytes(addr, height)
 	return binary.BigEndian.Uint64(sum[:8])
 }
 
-func rngForHeight(baseSeed, height uint64) *rand.Rand {
-	return rand.New(rand.NewSource(int64(heightSeed(baseSeed, height))))
+func RngForHeight(baseSeed, height uint64) *rand.Rand {
+	return rand.New(rand.NewSource(int64(HeightSeed(baseSeed, height))))
 }
 
-func rngForAddrHeight(addr []byte, height uint64) *rand.Rand {
-	return rand.New(rand.NewSource(int64(addrHeightSeed(addr, height))))
+func RngForAddrHeight(addr []byte, height uint64) *rand.Rand {
+	return rand.New(rand.NewSource(int64(AddrHeightSeed(addr, height))))
 }
 
-// standardNormal draws one N(0,1) sample via Box-Muller.
-func standardNormal(rng *rand.Rand) float64 {
+// StandardNormal draws one N(0,1) sample via Box-Muller.
+func StandardNormal(rng *rand.Rand) float64 {
 	u1, u2 := rng.Float64(), rng.Float64()
 	if u1 < 1e-12 {
 		u1 = 1e-12
@@ -50,7 +52,7 @@ func sampleGamma(rng *rand.Rand, shape, scale float64) float64 {
 	for {
 		var x, v float64
 		for {
-			x = standardNormal(rng)
+			x = StandardNormal(rng)
 			v = 1 + c*x
 			if v > 0 {
 				break
@@ -110,7 +112,7 @@ func fitLogNormal(p25, median, p75 float64) (mu, sigma float64) {
 }
 
 func sampleLogNormal(rng *rand.Rand, mu, sigma float64) float64 {
-	return math.Exp(mu + sigma*standardNormal(rng))
+	return math.Exp(mu + sigma*StandardNormal(rng))
 }
 
 type weightedOption struct {
@@ -136,4 +138,28 @@ func sampleCategorical(rng *rand.Rand, options []weightedOption) string {
 		}
 	}
 	return options[len(options)-1].label
+}
+
+// HashBytes was originally defined in mock_data.go (package main); it moved
+// here because HeightSeed/AddrHeightSeed depend on it and both live in gen
+// now. It has no mockChain dependency — it's a pure hash helper.
+func HashBytes(parts ...any) []byte {
+	h := sha256.New()
+	for _, p := range parts {
+		h.Write([]byte(fmt.Sprint(p)))
+	}
+	return h.Sum(nil)
+}
+
+// PickAccountIndex was originally defined in mock_data.go (package main);
+// like HashBytes it moved here — it's a pure hash-index helper with no
+// mockChain dependency, and the rename table pairs it with the other gen
+// exports. It maps a hash seed onto [0, n) without ever going through a
+// signed int cast of the raw uint64 first. AddrHeightSeed's return value
+// routinely exceeds math.MaxInt64; casting that straight to int wraps to a
+// negative number, and Go's % keeps the sign of the dividend — so
+// int(seed) % n can be negative and panic on the subsequent slice index.
+// Reducing mod n while still in uint64 space avoids that entirely.
+func PickAccountIndex(seed uint64, n int) int {
+	return int(seed % uint64(n))
 }
