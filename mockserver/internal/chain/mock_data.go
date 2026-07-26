@@ -48,18 +48,54 @@ type mockChain struct {
 	lockedBatchHeight    uint64
 }
 
+// Profile re-exports gen.Profile so mockserver (which must not import
+// internal/gen directly, see server.go's New() comment) can select it.
+type Profile = gen.Profile
+
+const (
+	ProfileBusy  = gen.ProfileBusy
+	ProfileQuiet = gen.ProfileQuiet
+)
+
+type chainOptions struct {
+	profile        *Profile
+	seed           *int64
+	validatorCount int
+	accountCount   int
+}
+
+type Option func(*chainOptions)
+
+// WithProfile overrides gen.ProfileForChain's automatic busy/quiet pick.
+func WithProfile(p Profile) Option { return func(o *chainOptions) { o.profile = &p } }
+
+// WithSeed overrides the RNG seed, which otherwise defaults to int64(chainID)
+// — use this to get different sampled data for the same chainID across runs.
+func WithSeed(seed int64) Option { return func(o *chainOptions) { o.seed = &seed } }
+
+// WithValidatorCount overrides the default of 10 validators.
+func WithValidatorCount(n int) Option { return func(o *chainOptions) { o.validatorCount = n } }
+
+// WithAccountCount overrides the default of one account per validator.
+func WithAccountCount(n int) Option { return func(o *chainOptions) { o.accountCount = n } }
+
 // NewMockChain is the internal/rpc-facing constructor; unexported newMockChain
 // stays the single source of truth so internal/chain's own tests keep using
 // the short name.
-func NewMockChain(numBlocks int, chainID uint64) *mockChain {
-	return newMockChain(numBlocks, chainID)
+func NewMockChain(numBlocks int, chainID uint64, opts ...Option) *mockChain {
+	return newMockChain(numBlocks, chainID, opts...)
 }
 
 // MockChain is an alias so internal/rpc can name the type it's holding
 // without reaching into unexported internals.
 type MockChain = mockChain
 
-func newMockChain(numBlocks int, chainID uint64) *mockChain {
+func newMockChain(numBlocks int, chainID uint64, opts ...Option) *mockChain {
+	cfg := chainOptions{}
+	for _, o := range opts {
+		o(&cfg)
+	}
+
 	mc := &mockChain{
 		chainID:        chainID,
 		blocks:         make(map[uint64]*lib.BlockResult),
@@ -71,9 +107,23 @@ func newMockChain(numBlocks int, chainID uint64) *mockChain {
 		states:         make(map[uint64]*fsm.GenesisState),
 	}
 
-	rng := rand.New(rand.NewSource(int64(chainID)))
-	mc.validators = buildValidators(chainID, rng)
-	mc.accounts = buildAccounts(mc.validators, rng)
+	seed := int64(chainID)
+	if cfg.seed != nil {
+		seed = *cfg.seed
+	}
+	rng := rand.New(rand.NewSource(seed))
+
+	validatorCount := 10
+	if cfg.validatorCount > 0 {
+		validatorCount = cfg.validatorCount
+	}
+	mc.validators = buildValidators(chainID, rng, validatorCount)
+
+	accountCount := len(mc.validators)
+	if cfg.accountCount > 0 {
+		accountCount = cfg.accountCount
+	}
+	mc.accounts = buildAccounts(mc.validators, rng, accountCount)
 	mc.pools = buildPools(mc.accounts, chainID, rng)
 	mc.orderBooks = buildOrderBooks(mc.validators, chainID)
 	mc.dexPrices = buildDexPrices(chainID)
@@ -85,6 +135,9 @@ func newMockChain(numBlocks int, chainID uint64) *mockChain {
 	mc.proposals = buildProposals(mc.validators)
 
 	profile := gen.ProfileForChain(mc.chainID)
+	if cfg.profile != nil {
+		profile = *cfg.profile
+	}
 	addrs := make([][]byte, len(mc.accounts))
 	for i, a := range mc.accounts {
 		addrs[i] = a.Address
@@ -110,11 +163,19 @@ func newMockChain(numBlocks int, chainID uint64) *mockChain {
 	return mc
 }
 
-func buildAccounts(validators []*fsm.Validator, rng *rand.Rand) []*fsm.Account {
-	accounts := make([]*fsm.Account, 0, len(validators))
-	for i, v := range validators {
+// buildAccounts creates count accounts: the first min(count, len(validators))
+// reuse validator addresses (preserving the original 1:1 mapping and its
+// determinism when count == len(validators)); any beyond that get addresses
+// derived from a hash, since accounts don't need a valid keypair.
+func buildAccounts(validators []*fsm.Validator, rng *rand.Rand, count int) []*fsm.Account {
+	accounts := make([]*fsm.Account, 0, count)
+	for i := 0; i < count; i++ {
+		addr := gen.HashBytes("account-addr", i)[:crypto.AddressSize]
+		if i < len(validators) {
+			addr = validators[i].Address
+		}
 		accounts = append(accounts, &fsm.Account{
-			Address: v.Address,
+			Address: addr,
 			Amount:  1_000_000 + uint64(i)*100_000 + uint64(rng.Intn(50_000)),
 		})
 	}
@@ -133,22 +194,39 @@ func buildPools(accounts []*fsm.Account, chainID uint64, rng *rand.Rand) []*fsm.
 
 var printOnce = new(sync.Once)
 
-func buildValidators(chainID uint64, rng *rand.Rand) []*fsm.Validator {
-	seeds := []string{
-		"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-		"1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100",
-		"1111111111111111111111111111111111111111111111111111111111111111",
-		"2222222222222222222222222222222222222222222222222222222222222222",
-		"3333333333333333333333333333333333333333333333333333333333333333",
-		"4444444444444444444444444444444444444444444444444444444444444444",
-		"5555555555555555555555555555555555555555555555555555555555555555",
-		"6666666666666666666666666666666666666666666666666666666666666666",
-		"7777777777777777777777777777777777777777777777777777777777777777",
-		"8888888888888888888888888888888888888888888888888888888888888888",
+// hardcodedValidatorSeeds are the original 10 fixed ed25519 seeds, kept
+// as-is so the default validatorCount (10) produces byte-identical output
+// to before WithValidatorCount existed.
+var hardcodedValidatorSeeds = []string{
+	"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+	"1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100",
+	"1111111111111111111111111111111111111111111111111111111111111111",
+	"2222222222222222222222222222222222222222222222222222222222222222",
+	"3333333333333333333333333333333333333333333333333333333333333333",
+	"4444444444444444444444444444444444444444444444444444444444444444",
+	"5555555555555555555555555555555555555555555555555555555555555555",
+	"6666666666666666666666666666666666666666666666666666666666666666",
+	"7777777777777777777777777777777777777777777777777777777777777777",
+	"8888888888888888888888888888888888888888888888888888888888888888",
+}
+
+// validatorSeed returns the i'th validator's 32-byte ed25519 seed: one of the
+// 10 hardcoded seeds if i is in range, otherwise a deterministic hash-derived
+// seed (sha256 output is already 32 bytes, same size ed25519 requires).
+func validatorSeed(chainID uint64, i int) []byte {
+	if i < len(hardcodedValidatorSeeds) {
+		seed, _ := hex.DecodeString(hardcodedValidatorSeeds[i])
+		return seed
 	}
-	validators := make([]*fsm.Validator, 0, len(seeds))
-	for i, seedHex := range seeds {
-		seed, _ := hex.DecodeString(seedHex)
+	return gen.HashBytes("validator-seed", chainID, i)
+}
+
+func buildValidators(chainID uint64, rng *rand.Rand, count int) []*fsm.Validator {
+	validators := make([]*fsm.Validator, 0, count)
+	seeds := make([][]byte, 0, count)
+	for i := 0; i < count; i++ {
+		seed := validatorSeed(chainID, i)
+		seeds = append(seeds, seed)
 		priv := ed25519.NewKeyFromSeed(seed)
 		pub := priv.Public().(ed25519.PublicKey)
 		pubKey, _ := crypto.NewPublicKeyFromBytes(pub)
@@ -167,8 +245,7 @@ func buildValidators(chainID uint64, rng *rand.Rand) []*fsm.Validator {
 	}
 	printOnce.Do(func() {
 		ks := crypto.NewKeystoreInMemory()
-		for i, seedHex := range seeds {
-			seed, _ := hex.DecodeString(seedHex)
+		for i, seed := range seeds {
 			priv := ed25519.NewKeyFromSeed(seed)
 			pk, err := crypto.NewPrivateKeyFromBytes(priv)
 			if err != nil {
