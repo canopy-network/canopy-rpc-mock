@@ -3,6 +3,7 @@ package rpc
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"math"
 	"net/http"
@@ -51,6 +52,7 @@ const (
 	retiredCommitteesPath    = "/v1/query/retired-committees"
 	pollPath                 = "/v1/gov/poll"
 	proposalsPath            = "/v1/gov/proposals"
+	indexerBlobsPath         = "/v1/query/indexer-blobs"
 )
 
 type heightPageRequest struct {
@@ -396,6 +398,41 @@ func RegisterRoutes(mux *http.ServeMux, mc *chain.MockChain) {
 
 	mux.HandleFunc(proposalsPath, func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, mc.Proposals())
+	})
+
+	mux.HandleFunc(indexerBlobsPath, func(w http.ResponseWriter, r *http.Request) {
+		req := struct {
+			Height uint64 `json:"height"`
+			Delta  bool   `json:"delta"`
+		}{}
+		decodeBody(r, &req)
+		if req.Height == 0 {
+			req.Height = mc.LatestHeight()
+		}
+		blobs, err := mc.BuildIndexerBlobs(req.Height)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, chain.ErrUnknownHeight) {
+				status = http.StatusNotFound
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+		// Delta sparsification is unconditional on the real node — ignores
+		// req.Delta — and this mock matches that (spec Section 10).
+		deltaBlobs, derr := fsm.DeltaIndexerBlobs(blobs)
+		if derr != nil {
+			http.Error(w, derr.Error(), http.StatusInternalServerError)
+			return
+		}
+		bz, merr := lib.Marshal(deltaBlobs)
+		if merr != nil {
+			http.Error(w, merr.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bz)
 	})
 }
 
