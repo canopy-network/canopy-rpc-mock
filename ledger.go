@@ -77,3 +77,15 @@ func snapshotBalancesAt(addrs [][]byte, chainID uint64, height uint64) []uint64 
 	}
 	return out
 }
+
+// stakeAt mirrors rawValue/balanceAt but scoped to the validator set, using a
+// separate log-normal fit — stakes and balances are different distributions.
+var stakeMu, stakeSigma = fitLogNormal(500_000, 931_000, 1_510_000_000) // chain_100/101 mean stake as rough anchors
+
+func stakeAt(addr []byte, chainID uint64, height uint64) uint64 {
+	rng := rngForAddrHeight(append(append([]byte{}, addr...), byte(chainID)), height)
+	const sigma = 0.1
+	base := sampleLogNormal(rngForAddrHeight(addr, 0), stakeMu, stakeSigma)
+	noise := standardNormal(rng)
+	return uint64(base * math.Exp(sigma*noise))
+}

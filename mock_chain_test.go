@@ -43,6 +43,17 @@ func TestAccountsFromValidatorKeys(t *testing.T) {
 	}
 }
 
+func TestClosedFormTxCountMatchesGenerator(t *testing.T) {
+	mc := newMockChain(50, 1)
+	for h := uint64(1); h <= 50; h++ {
+		want := txCountAt(mc.chainID, profileForChain(mc.chainID), h)
+		got := len(mc.txs[h])
+		if got != want {
+			t.Fatalf("height %d: block has %d txs, generator says %d", h, got, want)
+		}
+	}
+}
+
 func TestDelayedDexEvents(t *testing.T) {
 	mc := newMockChain(25, 1)
 	if len(mc.events[22]) == 0 {
