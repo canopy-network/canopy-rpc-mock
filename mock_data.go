@@ -590,15 +590,21 @@ func (mc *mockChain) generateBlock(height uint64, txs []*lib.TxResult, events []
 		NextValidatorRoot:  hashBytes("nextval", height),
 		ProposerAddress:    mc.validators[0].Address,
 	}
-	return &lib.BlockResult{
+	result := &lib.BlockResult{
 		BlockHeader:  header,
 		Transactions: txs,
 		Events:       events,
-		Meta: &lib.BlockResultMeta{
-			Size: 1024 + height*10,
-			Took: 2 + height%3,
-		},
 	}
+	bz, err := lib.Marshal(result)
+	size := uint64(1024)
+	if err == nil {
+		size = uint64(len(bz))
+	}
+	result.Meta = &lib.BlockResultMeta{
+		Size: size,
+		Took: 2 + height%3,
+	}
+	return result
 }
 
 func (mc *mockChain) generateCertificate(height uint64, blockHash []byte) *lib.QuorumCertificate {

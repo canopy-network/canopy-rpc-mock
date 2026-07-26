@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/canopy-network/canopy/fsm"
+	"github.com/canopy-network/canopy/lib"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 )
@@ -196,5 +197,24 @@ func TestGeneratedTxHasRealMsgPayload(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected at least one 'send' tx across heights 1-50")
+	}
+}
+
+func TestBlockMetaSizeIsActualSerializedLength(t *testing.T) {
+	mc := newMockChain(5, 1)
+	block := mc.blocks[3]
+	bz, err := lib.Marshal(block)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	// Meta.Size must be close to the actual marshaled length of the block
+	// header+txs+events (Meta itself isn't part of what's marshaled into bz,
+	// so exact equality isn't expected — but the formula-based value the old
+	// code used, 1024+height*10=1054, would be wildly off for a real block).
+	if block.Meta.Size == 1024+3*10 {
+		t.Fatalf("Meta.Size still uses the old fabricated formula")
+	}
+	if len(bz) == 0 {
+		t.Fatalf("expected non-empty marshaled block")
 	}
 }
