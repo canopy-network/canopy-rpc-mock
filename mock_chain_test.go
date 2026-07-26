@@ -60,3 +60,56 @@ func TestDelayedDexEvents(t *testing.T) {
 		t.Fatalf("expected dex events at height 22 after batch processing")
 	}
 }
+
+// TestSnapshotStateParity ensures per-height state snapshots still carry
+// OrderBooks/NonSigners/DoubleSigners/RetiredCommittees, matching the
+// behavior of the old mutable mockState replay.
+func TestSnapshotStateParity(t *testing.T) {
+	mc := newMockChain(60, 1)
+	if len(mc.validators) < 2 {
+		t.Fatalf("test requires at least 2 validators, got %d", len(mc.validators))
+	}
+
+	foundOrderBooks := false
+	foundNonSigners := false
+	for h := uint64(1); h <= 60; h++ {
+		state := mc.states[h]
+		if state == nil {
+			t.Fatalf("missing state snapshot at height %d", h)
+		}
+
+		if state.OrderBooks != nil {
+			foundOrderBooks = true
+			if state.OrderBooks != mc.orderBooks {
+				t.Fatalf("height %d: state.OrderBooks does not reuse mc.orderBooks", h)
+			}
+		}
+
+		if len(state.RetiredCommittees) != 1 || state.RetiredCommittees[0] != 42 {
+			t.Fatalf("height %d: expected RetiredCommittees [42], got %v", h, state.RetiredCommittees)
+		}
+
+		if len(state.NonSigners) > 0 {
+			foundNonSigners = true
+		}
+
+		if h%30 == 0 {
+			if len(state.DoubleSigners) == 0 {
+				t.Fatalf("height %d: expected non-empty DoubleSigners (h%%30==0)", h)
+			}
+			ds := state.DoubleSigners[0]
+			if len(ds.Heights) != 2 || ds.Heights[0] != h-1 || ds.Heights[1] != h {
+				t.Fatalf("height %d: unexpected DoubleSigner heights %v", h, ds.Heights)
+			}
+		} else if len(state.DoubleSigners) != 0 {
+			t.Fatalf("height %d: expected no DoubleSigners (h%%30!=0), got %v", h, state.DoubleSigners)
+		}
+	}
+
+	if !foundOrderBooks {
+		t.Fatalf("expected at least one height with non-nil OrderBooks")
+	}
+	if !foundNonSigners {
+		t.Fatalf("expected at least one height with populated NonSigners")
+	}
+}

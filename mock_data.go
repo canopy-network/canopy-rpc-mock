@@ -415,14 +415,31 @@ func (mc *mockChain) snapshotStateAt(addrs [][]byte, height uint64) *fsm.Genesis
 			Compound:        v.Compound,
 		}
 	}
+	var nonSigners fsm.NonSigners
+	if len(mc.validators) >= 2 {
+		nonSigners = fsm.NonSigners{
+			{Address: mc.validators[0].Address, Counter: height%3 + 1},
+			{Address: mc.validators[1].Address, Counter: height%2 + 1},
+		}
+	}
+
+	var doubleSigners []*lib.DoubleSigner
+	if height%30 == 0 && len(mc.validators) >= 2 {
+		doubleSigners = []*lib.DoubleSigner{{Id: mc.validators[1].Address, Heights: []uint64{height - 1, height}}}
+	}
+
 	return &fsm.GenesisState{
-		Time:       uint64(blockTimeMicro(height)),
-		Pools:      mc.pools,
-		Accounts:   accounts,
-		Validators: validators,
-		Params:     mc.params,
-		Supply:     &fsm.Supply{Total: totalSupplyAt(mc.chainID, height)},
-		Committees: mc.committees,
+		Time:              uint64(blockTimeMicro(height)),
+		Pools:             mc.pools,
+		Accounts:          accounts,
+		Validators:        validators,
+		Params:            mc.params,
+		Supply:            &fsm.Supply{Total: totalSupplyAt(mc.chainID, height)},
+		Committees:        mc.committees,
+		OrderBooks:        mc.orderBooks,
+		NonSigners:        nonSigners,
+		DoubleSigners:     doubleSigners,
+		RetiredCommittees: []uint64{42},
 	}
 }
 
