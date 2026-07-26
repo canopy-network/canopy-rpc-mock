@@ -1,8 +1,7 @@
-package main
+package chain
 
 import (
 	"encoding/hex"
-	"fmt"
 	"sort"
 
 	"github.com/canopy-network/canopy/fsm"
@@ -123,192 +122,12 @@ func (s *mockState) beginBlock(height uint64) *lib.QuorumCertificate {
 }
 
 func (s *mockState) endBlock(proposer []byte) lib.Events {
-	// distribute a small reward to proposer account
-	propKey := hex.EncodeToString(proposer)
-	s.accounts[propKey] += 500
-	// unpause anyone scheduled to unpause and delete finished unstaking
-	for _, val := range s.validatorsOrdered() {
-		key := hex.EncodeToString(val.addr)
-		if val.unstakingAt > 0 && val.unstakingAt <= s.height {
-			s.accounts[hex.EncodeToString(val.outputAddress)] += val.stake
-			val.stake = 0
-			val.unstakingAt = 0
-			evt := buildEvent(string(lib.EventTypeFinishUnstaking), &lib.Event_FinishUnstaking{FinishUnstaking: &lib.EventFinishUnstaking{}}, s.height, s.chainID, val.addr, "BEGIN_BLOCK")
-			s.addEvents(nil, evt)
-		}
-		if val.paused && s.height%5 == 0 {
-			val.paused = false
-		}
-		s.validators[key] = val
-	}
 	events := append(lib.Events{}, s.events...)
 	if delayed := s.delayedEvents[s.height]; len(delayed) > 0 {
 		events = append(events, delayed...)
 		delete(s.delayedEvents, s.height)
 	}
 	return events
-}
-
-func (s *mockState) applyTx(txType string, msg any) (tx *lib.Transaction, result *lib.TxResult, events lib.Events) {
-	var sender []byte
-	txHash := hashBytes(txType, s.height)
-	txHashStr := hex.EncodeToString(txHash)
-	orderID := orderIDFromTxHashString(txHashStr)
-	switch m := msg.(type) {
-	case *fsm.MessageSend:
-		sender = m.FromAddress
-		fromKey, toKey := hex.EncodeToString(m.FromAddress), hex.EncodeToString(m.ToAddress)
-		if s.accounts[fromKey] >= m.Amount {
-			s.accounts[fromKey] -= m.Amount
-			s.accounts[toKey] += m.Amount
-		}
-		events = s.addEvents(events, lib.Events{{
-			EventType:   string(lib.EventTypeReward),
-			Msg:         &lib.Event_Reward{Reward: &lib.EventReward{Amount: m.Amount / 100}},
-			Height:      s.height,
-			Reference:   txHashStr,
-			ChainId:     s.chainID,
-			BlockHeight: s.height,
-			BlockHash:   blockHash(s.height),
-			Address:     m.ToAddress,
-		}})
-	case *fsm.MessageStake:
-		sender = m.Signer
-		key := hex.EncodeToString(m.Signer)
-		if s.accounts[key] >= m.Amount {
-			s.accounts[key] -= m.Amount
-			if val, ok := s.validators[key]; ok {
-				val.stake += m.Amount
-			}
-		}
-	case *fsm.MessageEditStake:
-		sender = m.Address
-		key := hex.EncodeToString(m.Address)
-		if val, ok := s.validators[key]; ok {
-			val.stake = m.Amount
-		}
-	case *fsm.MessageUnstake:
-		sender = m.Address
-		key := hex.EncodeToString(m.Address)
-		if val, ok := s.validators[key]; ok {
-			val.unstakingAt = s.height + 5
-			s.validators[key] = val
-			events = s.addEvents(events, buildEvent(string(lib.EventTypeAutoBeginUnstaking), &lib.Event_AutoBeginUnstaking{AutoBeginUnstaking: &lib.EventAutoBeginUnstaking{}}, s.height, s.chainID, m.Address, txHashStr))
-		}
-	case *fsm.MessagePause:
-		sender = m.Address
-		key := hex.EncodeToString(m.Address)
-		if val, ok := s.validators[key]; ok {
-			val.paused = true
-			s.validators[key] = val
-		}
-		events = s.addEvents(events, buildEvent(string(lib.EventTypeAutoPause), &lib.Event_AutoPause{AutoPause: &lib.EventAutoPause{}}, s.height, s.chainID, m.Address, txHashStr))
-	case *fsm.MessageUnpause:
-		sender = m.Address
-		key := hex.EncodeToString(m.Address)
-		if val, ok := s.validators[key]; ok {
-			val.paused = false
-		}
-	case *fsm.MessageChangeParameter:
-		sender = m.Signer
-		switch m.ParameterSpace {
-		case "fee":
-			s.params.Fee.SendFee = 20
-		case "val":
-			s.params.Validator.MinimumStakeForValidators = 50_000
-		}
-	case *fsm.MessageDAOTransfer:
-		sender = m.Address
-		destKey := hex.EncodeToString(m.Address)
-		s.accounts[destKey] += m.Amount
-		ev := buildEvent(string(lib.EventTypeReward), &lib.Event_Reward{Reward: &lib.EventReward{Amount: m.Amount}}, s.height, s.chainID, m.Address, txHashStr)
-		events = s.addEvents(events, ev)
-	case *fsm.MessageSubsidy:
-		sender = m.Address
-		if pool, ok := s.pools[m.ChainId+fsm.HoldingPoolAddend]; ok {
-			pool.Amount += m.Amount
-		}
-	case *fsm.MessageCreateOrder:
-		sender = m.SellersSendAddress
-		m.OrderId = orderID
-		ob := s.orderBooks[m.ChainId]
-		ob = append(ob, &lib.SellOrder{
-			Id:                   orderID,
-			Committee:            m.ChainId,
-			Data:                 m.Data,
-			AmountForSale:        m.AmountForSale,
-			RequestedAmount:      m.RequestedAmount,
-			SellerReceiveAddress: m.SellerReceiveAddress,
-			BuyerSendAddress:     m.SellersSendAddress,
-			BuyerReceiveAddress:  m.SellersSendAddress,
-			BuyerChainDeadline:   s.height + 100,
-			SellersSendAddress:   m.SellersSendAddress,
-		})
-		s.orderBooks[m.ChainId] = ob
-		ev := buildEvent(string(lib.EventTypeOrderBookSwap), &lib.Event_OrderBookSwap{OrderBookSwap: &lib.EventOrderBookSwap{
-			SoldAmount:           m.AmountForSale,
-			BoughtAmount:         m.RequestedAmount,
-			SellerReceiveAddress: m.SellerReceiveAddress,
-			BuyerSendAddress:     m.SellersSendAddress,
-			SellersSendAddress:   m.SellersSendAddress,
-			OrderId:              orderID,
-			Data:                 m.Data,
-		}}, s.height, s.chainID, m.SellersSendAddress, txHashStr)
-		events = s.addEvents(events, ev)
-	case *fsm.MessageEditOrder:
-		ob := s.orderBooks[m.ChainId]
-		for _, o := range ob {
-			if hex.EncodeToString(o.Id) == hex.EncodeToString(m.OrderId) {
-				o.AmountForSale = m.AmountForSale
-				o.RequestedAmount = m.RequestedAmount
-			}
-		}
-	case *fsm.MessageDeleteOrder:
-		ob := s.orderBooks[m.ChainId]
-		filter := ob[:0]
-		for _, o := range ob {
-			if hex.EncodeToString(o.Id) != hex.EncodeToString(m.OrderId) {
-				filter = append(filter, o)
-			}
-		}
-		s.orderBooks[m.ChainId] = filter
-		ev := buildEvent(string(lib.EventTypeOrderBookSwap), &lib.Event_OrderBookSwap{OrderBookSwap: &lib.EventOrderBookSwap{
-			SoldAmount: 50, BoughtAmount: 100, SellersSendAddress: sender, OrderId: m.OrderId, SellerReceiveAddress: sender, BuyerSendAddress: sender, Data: []byte("delete"),
-		}}, s.height, s.chainID, sender, txHashStr)
-		events = s.addEvents(events, ev)
-	case *fsm.MessageDexLimitOrder:
-		sender = m.Address
-		m.OrderId = orderID
-	case *fsm.MessageDexLiquidityDeposit:
-		sender = m.Address
-		m.OrderId = orderID
-	case *fsm.MessageDexLiquidityWithdraw:
-		sender = m.Address
-		m.OrderId = orderID
-	case *fsm.MessageCertificateResults:
-		sender = m.Qc.ProposerKey
-	}
-
-	tx = &lib.Transaction{
-		MessageType:   txType,
-		Msg:           mustAny(msg),
-		CreatedHeight: s.height,
-		Time:          uint64(blockTimeMicro(s.height) + 150_000),
-		Fee:           10,
-		Memo:          fmt.Sprintf("%s-%d", txType, s.height),
-		NetworkId:     mockNetworkID,
-		ChainId:       s.chainID,
-	}
-	result = &lib.TxResult{
-		Sender:      sender,
-		Recipient:   nil,
-		MessageType: txType,
-		Height:      s.height,
-		Index:       0,
-		Transaction: tx,
-		TxHash:      txHashStr,
-	}
-	return tx, result, events
 }
 
 func orderIDFromTxHash(txHash []byte) []byte {

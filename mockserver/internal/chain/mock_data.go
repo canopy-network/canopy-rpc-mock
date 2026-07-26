@@ -1,4 +1,4 @@
-package main
+package chain
 
 import (
 	"crypto/ed25519"
@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/canopy-network/canopy-rpc-mock/mockserver/internal/gen"
 	"github.com/canopy-network/canopy/fsm"
 	"github.com/canopy-network/canopy/lib"
 	"github.com/canopy-network/canopy/lib/crypto"
@@ -45,11 +46,18 @@ type mockChain struct {
 	proposals            fsm.GovProposals
 	lockedBatch          *lib.DexBatch
 	lockedBatchHeight    uint64
-	scheduledBatches     map[uint64]*lib.DexBatch
-	nextBatchOrders      []*lib.DexLimitOrder
-	nextBatchDeposits    []*lib.DexLiquidityDeposit
-	nextBatchWithdrawals []*lib.DexLiquidityWithdraw
 }
+
+// NewMockChain is the internal/rpc-facing constructor; unexported newMockChain
+// stays the single source of truth so internal/chain's own tests keep using
+// the short name.
+func NewMockChain(numBlocks int, chainID uint64) *mockChain {
+	return newMockChain(numBlocks, chainID)
+}
+
+// MockChain is an alias so internal/rpc can name the type it's holding
+// without reaching into unexported internals.
+type MockChain = mockChain
 
 func newMockChain(numBlocks int, chainID uint64) *mockChain {
 	mc := &mockChain{
@@ -75,33 +83,28 @@ func newMockChain(numBlocks int, chainID uint64) *mockChain {
 	mc.retiredCommittees = []uint64{42}
 	mc.poll = buildPoll(mc.validators)
 	mc.proposals = buildProposals(mc.validators)
-	mc.scheduledBatches = make(map[uint64]*lib.DexBatch)
 
-	state := newMockState(mc.chainID, mc.accounts, mc.validators, mc.pools, mc.params, mc.orderBooks, mc.dexPrices, mc.committees)
-	mc.states[0] = state.snapshot()
+	profile := gen.ProfileForChain(mc.chainID)
+	addrs := make([][]byte, len(mc.accounts))
+	for i, a := range mc.accounts {
+		addrs[i] = a.Address
+	}
 	mc.lockedBatch = mc.generateDexBatch(0, false, nil, nil, nil)
+	mc.states[0] = mc.snapshotStateAt(addrs, 0)
 	for h := 1; h <= numBlocks; h++ {
 		height := uint64(h)
-		qc := state.beginBlock(height)
-
-		mc.applyScheduledDex(state, height)
-		mc.rotateDexBatches(state, height)
-		blockTxs, txResults, _ := mc.buildBlockTransactions(state, height)
-		mc.trackDexOps(txResults, height)
-
-		allEvents := state.endBlock(mc.validators[0].Address)
+		txResults := mc.generateClosedFormTxs(height, profile)
+		events := mc.generateClosedFormEvents(height, profile)
 
 		mc.txs[height] = txResults
-		mc.events[height] = allEvents
+		mc.events[height] = events
 
-		block := mc.generateBlock(height, txResults, allEvents)
+		block := mc.generateBlock(height, txResults, events)
 		mc.blocks[height] = block
-		mc.certs[height] = qc
 		mc.dexBatches[height] = mc.lockedBatch
-		mc.nextDexBatches[height] = mc.generateDexBatch(height, true, mc.nextBatchOrders, mc.nextBatchDeposits, mc.nextBatchWithdrawals)
-		mc.states[height] = state.snapshot()
-
-		_ = blockTxs // retained for future use/debug
+		mc.nextDexBatches[height] = mc.generateDexBatch(height, true, nil, nil, nil)
+		mc.states[height] = mc.snapshotStateAt(addrs, height)
+		mc.certs[height] = mc.buildCertificateForTx(height)
 	}
 
 	return mc
@@ -187,7 +190,7 @@ func buildOrderBooks(validators []*fsm.Validator, chainID uint64) *lib.OrderBook
 	v1 := validators[1].Address
 	orders := []*lib.SellOrder{
 		{
-			Id:                   hashBytes("order-1"),
+			Id:                   gen.HashBytes("order-1"),
 			Committee:            chainID,
 			Data:                 []byte("swap CNPY for sidechain asset"),
 			AmountForSale:        50_000,
@@ -199,7 +202,7 @@ func buildOrderBooks(validators []*fsm.Validator, chainID uint64) *lib.OrderBook
 			SellersSendAddress:   v0,
 		},
 		{
-			Id:                   hashBytes("order-2"),
+			Id:                   gen.HashBytes("order-2"),
 			Committee:            2,
 			Data:                 []byte("swap sidechain for CNPY"),
 			AmountForSale:        75_000,
@@ -305,120 +308,213 @@ func buildCommittees(validators []*fsm.Validator) *lib.CommitteesData {
 	}
 }
 
-// buildBlockTransactions creates a deterministic mix of transaction types for a height
-func (mc *mockChain) buildBlockTransactions(state *mockState, height uint64) ([]*lib.Transaction, []*lib.TxResult, lib.Events) {
-	var txs []*lib.Transaction
-	var results []*lib.TxResult
-	var events lib.Events
-	builders := mc.txBuilders(state, height)
-	for idx, builder := range builders {
-		tx, res, ev := state.applyTx(builder.msgType, builder.msg)
-		res.Index = uint64(idx)
-		txs = append(txs, tx)
-		results = append(results, res)
-		events = append(events, ev...)
+func (mc *mockChain) generateClosedFormTxs(height uint64, profile gen.Profile) []*lib.TxResult {
+	count := gen.TxCountAt(mc.chainID, profile, height)
+	results := make([]*lib.TxResult, 0, count)
+	for i := 0; i < count; i++ {
+		typeLabel := gen.TxTypeMixAt(mc.chainID, profile, height+uint64(i+1)*1_000_003) // distinct salt per slot; i+1 avoids colliding with TxCountAt's zero-salt seed at i=0
+		idx := gen.PickAccountIndex(gen.AddrHeightSeed(mc.accounts[0].Address, height+uint64(i)), len(mc.accounts))
+		sender := mc.accounts[idx].Address
+		recipientIdx := gen.PickAccountIndex(gen.AddrHeightSeed(mc.accounts[0].Address, height+uint64(i)+1), len(mc.accounts))
+		recipient := mc.accounts[recipientIdx].Address
+		txHash := gen.HashBytes("tx", mc.chainID, height, i)
+		msgType := messageTypeForLabel(typeLabel)
+		anyMsg := mc.buildTxMsg(typeLabel, sender, recipient, height)
+		results = append(results, &lib.TxResult{
+			Sender:      sender,
+			MessageType: msgType,
+			Height:      height,
+			Index:       uint64(i),
+			Transaction: &lib.Transaction{
+				MessageType:   msgType,
+				Msg:           anyMsg,
+				CreatedHeight: height,
+				Time:          uint64(blockTimeMicro(height)),
+				Fee:           10,
+				NetworkId:     mockNetworkID,
+				ChainId:       mc.chainID,
+			},
+			TxHash: hex.EncodeToString(txHash),
+		})
 	}
-	return txs, results, events
+	return results
 }
 
-type txBuilder struct {
-	msgType string
-	msg     any
-}
-
-func (mc *mockChain) txBuilders(state *mockState, height uint64) []txBuilder {
-	val := state.validatorsOrdered()[int(height)%len(state.validatorsOrdered())]
-	nextVal := state.validatorsOrdered()[(int(height)+1)%len(state.validatorsOrdered())]
-	recipient := state.validatorsOrdered()[(int(height)+2)%len(state.validatorsOrdered())].addr
-	from := val.addr
-
-	// cycle message types across blocks
-	switch (height - 1) % 15 {
-	case 0:
-		return []txBuilder{{
-			msgType: fsm.MessageSendName,
-			msg:     &fsm.MessageSend{FromAddress: from, ToAddress: recipient, Amount: 1_000 + height},
-		}}
-	case 1:
-		return []txBuilder{{
-			msgType: fsm.MessageStakeName,
-			msg:     &fsm.MessageStake{PublicKey: val.pubKey, Amount: 10_000, Committees: []uint64{mc.chainID}, NetAddress: val.netAddress, OutputAddress: val.outputAddress, Delegate: val.delegate, Compound: val.compound, Signer: from},
-		}}
-	case 2:
-		return []txBuilder{{
-			msgType: fsm.MessageEditStakeName,
-			msg:     &fsm.MessageEditStake{Address: val.addr, Amount: val.stake + 5_000, Committees: val.committees, NetAddress: val.netAddress, OutputAddress: val.outputAddress, Compound: val.compound},
-		}}
-	case 3:
-		return []txBuilder{{msgType: fsm.MessageUnstakeName, msg: &fsm.MessageUnstake{Address: val.addr}}}
-	case 4:
-		return []txBuilder{{msgType: fsm.MessagePauseName, msg: &fsm.MessagePause{Address: val.addr}}}
-	case 5:
-		return []txBuilder{{msgType: fsm.MessageUnpauseName, msg: &fsm.MessageUnpause{Address: val.addr}}}
-	case 6:
-		paramValue, _ := anypb.New(&lib.UInt64Wrapper{Value: 20})
-		return []txBuilder{{msgType: fsm.MessageChangeParameterName, msg: &fsm.MessageChangeParameter{
-			ParameterSpace: "fee",
-			ParameterKey:   "sendFee",
-			ParameterValue: paramValue,
-			Signer:         from,
-			ProposalHash:   hex.EncodeToString(hashBytes("param", height)),
-		}}}
-	case 7:
-		return []txBuilder{{msgType: fsm.MessageDAOTransferName, msg: &fsm.MessageDAOTransfer{Address: recipient, Amount: 5_000, StartHeight: height, EndHeight: height + 10, ProposalHash: hex.EncodeToString(hashBytes("dao", height))}}}
-	case 8:
-		return []txBuilder{{
-			msgType: fsm.MessageCertificateResultsName,
-			msg:     &fsm.MessageCertificateResults{Qc: mc.buildCertificateForTx(height - 1)},
-		}}
-	case 9:
-		return []txBuilder{{msgType: fsm.MessageSubsidyName, msg: &fsm.MessageSubsidy{Address: from, ChainId: mc.chainID, Amount: 2_000, Opcode: []byte("reinvest")}}}
-	case 10:
-		return []txBuilder{{msgType: fsm.MessageCreateOrderName, msg: &fsm.MessageCreateOrder{
-			ChainId:              mc.chainID,
-			Data:                 []byte("sell"),
-			AmountForSale:        10_000,
-			RequestedAmount:      500,
-			SellerReceiveAddress: from,
-			SellersSendAddress:   from,
-		}}}
-	case 11:
-		createOrderSender := state.validatorsOrdered()[(int(height)-1)%len(state.validatorsOrdered())].addr
-		createOrderID := orderIDFromTxHash(hashBytes(fsm.MessageCreateOrderName, height-1))
-		return []txBuilder{{msgType: fsm.MessageEditOrderName, msg: &fsm.MessageEditOrder{
-			ChainId:              mc.chainID,
-			OrderId:              createOrderID,
-			AmountForSale:        12_000,
-			RequestedAmount:      600,
-			SellerReceiveAddress: createOrderSender,
-		}}}
-	case 12:
-		createOrderID := orderIDFromTxHash(hashBytes(fsm.MessageCreateOrderName, height-2))
-		return []txBuilder{{msgType: fsm.MessageDeleteOrderName, msg: &fsm.MessageDeleteOrder{
-			ChainId: mc.chainID,
-			OrderId: createOrderID,
-		}}}
-	case 13:
-		return []txBuilder{{msgType: fsm.MessageDexLimitOrderName, msg: &fsm.MessageDexLimitOrder{
+// buildTxMsg constructs a minimal-but-real fsm message for the given
+// gen.TxTypeMixAt label and packs it into an *anypb.Any for Transaction.Msg.
+// Field values are placeholders (not statistically calibrated) — the goal
+// is a valid, non-empty, decodable payload, not realistic message content.
+func (mc *mockChain) buildTxMsg(label string, sender, recipient []byte, height uint64) *anypb.Any {
+	var msg proto.Message
+	switch label {
+	case "send":
+		msg = &fsm.MessageSend{FromAddress: sender, ToAddress: recipient, Amount: 1_000 + height}
+	case "dexLimitOrder":
+		msg = &fsm.MessageDexLimitOrder{
 			ChainId:         mc.chainID,
 			AmountForSale:   2_500,
 			RequestedAmount: 200,
-			Address:         from,
-		}}}
-	case 14:
-		return []txBuilder{
-			{msgType: fsm.MessageDexLiquidityDepositName, msg: &fsm.MessageDexLiquidityDeposit{ChainId: mc.chainID, Amount: 4_000, Address: from}},
-			{msgType: fsm.MessageDexLiquidityWithdrawName, msg: &fsm.MessageDexLiquidityWithdraw{ChainId: mc.chainID, Percent: 10, Address: nextVal.addr}},
+			Address:         sender,
 		}
+	case "editStake":
+		msg = &fsm.MessageEditStake{
+			Address:       sender,
+			Amount:        10_000 + height,
+			Committees:    []uint64{mc.chainID},
+			NetAddress:    fmt.Sprintf("127.0.0.1:%d", 26650),
+			OutputAddress: sender,
+			Compound:      false,
+			Signer:        sender,
+		}
+	case "certResults":
+		msg = &fsm.MessageCertificateResults{Qc: mc.buildCertificateForTx(height)}
+	case "dexLiqDeposit":
+		msg = &fsm.MessageDexLiquidityDeposit{ChainId: mc.chainID, Amount: 4_000, Address: sender}
+	case "dexLiqWithdraw":
+		msg = &fsm.MessageDexLiquidityWithdraw{ChainId: mc.chainID, Percent: 10, Address: sender}
+	case "stake":
+		msg = &fsm.MessageStake{
+			PublicKey:     sender,
+			Amount:        10_000,
+			Committees:    []uint64{mc.chainID},
+			NetAddress:    fmt.Sprintf("127.0.0.1:%d", 26650),
+			OutputAddress: sender,
+			Delegate:      false,
+			Compound:      false,
+			Signer:        sender,
+		}
+	case "unstake":
+		msg = &fsm.MessageUnstake{Address: sender}
 	default:
+		msg = &fsm.MessageSend{FromAddress: sender, ToAddress: recipient, Amount: 1_000 + height}
+	}
+	anyMsg, err := anypb.New(msg)
+	if err != nil {
 		return nil
+	}
+	return anyMsg
+}
+
+// messageTypeForLabel maps the gen.TxTypeMixAt() weighted labels onto real fsm
+// message-type name constants, so downstream consumers (e.g. tx-type-mix
+// counters in canopy-indexer tests) see real message types.
+func messageTypeForLabel(label string) string {
+	switch label {
+	case "send":
+		return fsm.MessageSendName
+	case "dexLimitOrder":
+		return fsm.MessageDexLimitOrderName
+	case "editStake":
+		return fsm.MessageEditStakeName
+	case "certResults":
+		return fsm.MessageCertificateResultsName
+	case "dexLiqDeposit":
+		return fsm.MessageDexLiquidityDepositName
+	case "dexLiqWithdraw":
+		return fsm.MessageDexLiquidityWithdrawName
+	case "stake":
+		return fsm.MessageStakeName
+	case "unstake":
+		return fsm.MessageUnstakeName
+	default:
+		return fsm.MessageSendName
+	}
+}
+
+func (mc *mockChain) generateClosedFormEvents(height uint64, profile gen.Profile) []*lib.Event {
+	count := gen.EventCountAt(mc.chainID, profile, height)
+	events := make([]*lib.Event, 0, count)
+	bh := blockHash(height)
+	for i := 0; i < count; i++ {
+		label := gen.EventTypeMixAt(mc.chainID, profile, height+uint64(i+1)*1_000_003) // distinct salt per slot; i+1 avoids colliding with EventCountAt's zero-salt seed at i=0
+		idx := gen.PickAccountIndex(gen.AddrHeightSeed(mc.accounts[0].Address, height+uint64(i)), len(mc.accounts))
+		addr := mc.accounts[idx].Address
+		events = append(events, buildClosedFormEvent(label, height, mc.chainID, addr, bh)...)
+	}
+	return events
+}
+
+func buildClosedFormEvent(label string, height, chainID uint64, addr, blockHash []byte) []*lib.Event {
+	base := &lib.Event{Height: height, ChainId: chainID, BlockHeight: height, BlockHash: blockHash, Address: addr}
+	switch label {
+	case "reward":
+		base.EventType = string(lib.EventTypeReward)
+		base.Msg = &lib.Event_Reward{Reward: &lib.EventReward{Amount: 5}}
+	case "dexSwap":
+		base.EventType = string(lib.EventTypeDexSwap)
+		base.Msg = &lib.Event_DexSwap{DexSwap: &lib.EventDexSwap{SoldAmount: 1_000, BoughtAmount: 900, LocalOrigin: true, Success: true}}
+	case "dexLiquidityDeposit":
+		base.EventType = string(lib.EventTypeDexLiquidityDeposit)
+		base.Msg = &lib.Event_DexLiquidityDeposit{DexLiquidityDeposit: &lib.EventDexLiquidityDeposit{Amount: 500, Points: 50}}
+	default:
+		base.EventType = string(lib.EventTypeReward)
+		base.Msg = &lib.Event_Reward{Reward: &lib.EventReward{Amount: 5}}
+	}
+	return []*lib.Event{base}
+}
+
+// snapshotStateAt builds a GenesisState purely from closed-form lookups —
+// no mutable ledger, no replay.
+func (mc *mockChain) snapshotStateAt(addrs [][]byte, height uint64) *fsm.GenesisState {
+	balances := gen.SnapshotBalancesAt(addrs, mc.chainID, height)
+	accounts := make([]*fsm.Account, len(addrs))
+	for i, a := range addrs {
+		accounts[i] = &fsm.Account{Address: a, Amount: balances[i]}
+	}
+	validators := make([]*fsm.Validator, len(mc.validators))
+	var totalStaked uint64
+	for i, v := range mc.validators {
+		status := gen.ValidatorStatusAt(v.Address, 0, height)
+		unstakingHeight := uint64(0)
+		if status == gen.ValidatorUnstaked {
+			unstakingHeight = gen.UnstakeHeightFor(v.Address, 0)
+		}
+		stakeAt := gen.StakeAt(v.Address, mc.chainID, height)
+		totalStaked += stakeAt
+		validators[i] = &fsm.Validator{
+			Address:         v.Address,
+			PublicKey:       v.PublicKey,
+			NetAddress:      v.NetAddress,
+			StakedAmount:    stakeAt,
+			Committees:      v.Committees,
+			UnstakingHeight: unstakingHeight,
+			Output:          v.Output,
+			Delegate:        v.Delegate,
+			Compound:        v.Compound,
+		}
+	}
+	var nonSigners fsm.NonSigners
+	if len(mc.validators) >= 2 {
+		nonSigners = fsm.NonSigners{
+			{Address: mc.validators[0].Address, Counter: height%3 + 1},
+			{Address: mc.validators[1].Address, Counter: height%2 + 1},
+		}
+	}
+
+	var doubleSigners []*lib.DoubleSigner
+	if height > 0 && height%30 == 0 && len(mc.validators) >= 2 {
+		doubleSigners = []*lib.DoubleSigner{{Id: mc.validators[1].Address, Heights: []uint64{height - 1, height}}}
+	}
+
+	return &fsm.GenesisState{
+		Time:              uint64(blockTimeMicro(height)),
+		Pools:             mc.pools,
+		Accounts:          accounts,
+		Validators:        validators,
+		Params:            mc.params,
+		Supply:            &fsm.Supply{Total: gen.TotalSupplyAt(mc.chainID, height), Staked: totalStaked},
+		Committees:        mc.committees,
+		OrderBooks:        mc.orderBooks,
+		NonSigners:        nonSigners,
+		DoubleSigners:     doubleSigners,
+		RetiredCommittees: []uint64{42},
 	}
 }
 
 func buildPoll(validators []*fsm.Validator) fsm.Poll {
 	return fsm.Poll{
-		hex.EncodeToString(hashBytes("proposal:change-fee")): fsm.PollResult{
-			ProposalHash: hex.EncodeToString(hashBytes("proposal:change-fee")),
+		hex.EncodeToString(gen.HashBytes("proposal:change-fee")): fsm.PollResult{
+			ProposalHash: hex.EncodeToString(gen.HashBytes("proposal:change-fee")),
 			ProposalURL:  "https://example.com/proposals/change-fee",
 			Accounts: fsm.VoteStats{
 				ApproveTokens:     600,
@@ -468,91 +564,15 @@ func buildProposals(validators []*fsm.Validator) fsm.GovProposals {
 	paramRaw, _ := json.Marshal(paramProposal)
 	daoRaw, _ := json.Marshal(daoProposal)
 	return fsm.GovProposals{
-		hex.EncodeToString(hashBytes("proposal:change-fee")): {
+		hex.EncodeToString(gen.HashBytes("proposal:change-fee")): {
 			Proposal: paramRaw,
 			Approve:  true,
 		},
-		hex.EncodeToString(hashBytes("proposal:dao-treasury")): {
+		hex.EncodeToString(gen.HashBytes("proposal:dao-treasury")): {
 			Proposal: daoRaw,
 			Approve:  true,
 		},
 	}
-}
-
-func (mc *mockChain) generateTxs(height uint64) []*lib.TxResult {
-	rng := rand.New(rand.NewSource(int64(height)))
-	results := make([]*lib.TxResult, 0, 2)
-	baseTime := blockTimeMicro(height)
-	for i := 0; i < 2; i++ {
-		sender := mc.accounts[(int(height)+i)%len(mc.accounts)].Address
-		recipient := mc.accounts[(int(height)+i+1)%len(mc.accounts)].Address
-		amount := uint64(1_000 + i*250 + int(height))
-		message := &fsm.MessageSend{
-			FromAddress: sender,
-			ToAddress:   recipient,
-			Amount:      amount,
-		}
-		anyMsg, _ := anypb.New(message)
-		tx := &lib.Transaction{
-			MessageType:   fsm.MessageSendName,
-			Msg:           anyMsg,
-			CreatedHeight: height,
-			Time:          uint64(baseTime + int64(i)*250_000),
-			Fee:           10,
-			Memo:          fmt.Sprintf("mock transfer %d", height),
-			NetworkId:     mockNetworkID,
-			ChainId:       mc.chainID,
-		}
-		results = append(results, &lib.TxResult{
-			Sender:      sender,
-			Recipient:   recipient,
-			MessageType: tx.MessageType,
-			Height:      height,
-			Index:       uint64(i),
-			Transaction: tx,
-			TxHash:      hex.EncodeToString(hashBytes("tx", height, i, rng.Int())),
-		})
-	}
-	return results
-}
-
-func (mc *mockChain) generateEvents(height uint64) []*lib.Event {
-	blockHash := blockHash(height)
-	evts := make([]*lib.Event, 0, len(mc.txs[height])+1)
-	for idx, tx := range mc.txs[height] {
-		evts = append(evts, &lib.Event{
-			EventType:   string(lib.EventTypeReward),
-			Msg:         &lib.Event_Reward{Reward: &lib.EventReward{Amount: 5 + uint64(idx)}},
-			Height:      height,
-			Reference:   tx.TxHash,
-			ChainId:     mc.chainID,
-			BlockHeight: height,
-			BlockHash:   blockHash,
-			Address:     tx.Recipient,
-		})
-	}
-	// add a synthetic dex swap event every 5 blocks
-	if height%5 == 0 {
-		evts = append(evts, &lib.Event{
-			EventType: string(lib.EventTypeDexSwap),
-			Msg: &lib.Event_DexSwap{
-				DexSwap: &lib.EventDexSwap{
-					SoldAmount:   1_000,
-					BoughtAmount: 900,
-					LocalOrigin:  true,
-					Success:      true,
-					OrderId:      orderIDFromTxHash(hashBytes("dex-swap", height)),
-				},
-			},
-			Height:      height,
-			Reference:   fmt.Sprintf("dex-%d", height),
-			ChainId:     mc.chainID,
-			BlockHeight: height,
-			BlockHash:   blockHash,
-			Address:     mc.accounts[0].Address,
-		})
-	}
-	return evts
 }
 
 func (mc *mockChain) generateBlock(height uint64, txs []*lib.TxResult, events []*lib.Event) *lib.BlockResult {
@@ -569,21 +589,27 @@ func (mc *mockChain) generateBlock(height uint64, txs []*lib.TxResult, events []
 		TotalTxs:           totalTxs,
 		TotalVdfIterations: height * 100,
 		LastBlockHash:      blockHash(height - 1),
-		StateRoot:          hashBytes("state", height),
-		TransactionRoot:    hashBytes("txroot", height),
-		ValidatorRoot:      hashBytes("valroot", height),
-		NextValidatorRoot:  hashBytes("nextval", height),
+		StateRoot:          gen.HashBytes("state", height),
+		TransactionRoot:    gen.HashBytes("txroot", height),
+		ValidatorRoot:      gen.HashBytes("valroot", height),
+		NextValidatorRoot:  gen.HashBytes("nextval", height),
 		ProposerAddress:    mc.validators[0].Address,
 	}
-	return &lib.BlockResult{
+	result := &lib.BlockResult{
 		BlockHeader:  header,
 		Transactions: txs,
 		Events:       events,
-		Meta: &lib.BlockResultMeta{
-			Size: 1024 + height*10,
-			Took: 2 + height%3,
-		},
 	}
+	bz, err := lib.Marshal(result)
+	size := uint64(1024)
+	if err == nil {
+		size = uint64(len(bz))
+	}
+	result.Meta = &lib.BlockResultMeta{
+		Size: size,
+		Took: 2 + height%3,
+	}
+	return result
 }
 
 func (mc *mockChain) generateCertificate(height uint64, blockHash []byte) *lib.QuorumCertificate {
@@ -593,7 +619,7 @@ func (mc *mockChain) generateCertificate(height uint64, blockHash []byte) *lib.Q
 func (mc *mockChain) generateDexBatch(height uint64, next bool, orders []*lib.DexLimitOrder, deposits []*lib.DexLiquidityDeposit, withdrawals []*lib.DexLiquidityWithdraw) *lib.DexBatch {
 	return &lib.DexBatch{
 		Committee:        mc.chainID,
-		ReceiptHash:      hashBytes("receipt", height, next),
+		ReceiptHash:      gen.HashBytes("receipt", height, next),
 		Orders:           orders,
 		Deposits:         deposits,
 		Withdrawals:      withdrawals,
@@ -689,42 +715,14 @@ func (mc *mockChain) buildCertificateForTx(height uint64) *lib.QuorumCertificate
 			DexBatch:        mc.dexBatches[height],
 			SlashRecipients: slashing,
 		},
-		ResultsHash: hashBytes("result-hash", height),
+		ResultsHash: gen.HashBytes("result-hash", height),
 		Block:       bh,
 		BlockHash:   bh,
 		ProposerKey: mc.validators[0].PublicKey,
 		Signature: &lib.AggregateSignature{
-			Signature: hashBytes("agg-sig", height)[:32],
+			Signature: gen.HashBytes("agg-sig", height)[:32],
 			Bitmap:    []byte{0xff, 0x00},
 		},
-	}
-}
-
-func (mc *mockChain) trackDexOps(results []*lib.TxResult, height uint64) {
-	for _, res := range results {
-		if res == nil || res.Transaction == nil {
-			continue
-		}
-		orderID := orderIDFromTxHashString(res.TxHash)
-		switch res.Transaction.MessageType {
-		case fsm.MessageDexLimitOrderName:
-			msg := new(fsm.MessageDexLimitOrder)
-			_ = anypb.UnmarshalTo(res.Transaction.Msg, msg, proto.UnmarshalOptions{})
-			mc.nextBatchOrders = append(mc.nextBatchOrders, &lib.DexLimitOrder{
-				AmountForSale:   msg.AmountForSale,
-				RequestedAmount: msg.RequestedAmount,
-				Address:         msg.Address,
-				OrderId:         orderID,
-			})
-		case fsm.MessageDexLiquidityDepositName:
-			msg := new(fsm.MessageDexLiquidityDeposit)
-			_ = anypb.UnmarshalTo(res.Transaction.Msg, msg, proto.UnmarshalOptions{})
-			mc.nextBatchDeposits = append(mc.nextBatchDeposits, &lib.DexLiquidityDeposit{Address: msg.Address, Amount: msg.Amount, OrderId: orderID})
-		case fsm.MessageDexLiquidityWithdrawName:
-			msg := new(fsm.MessageDexLiquidityWithdraw)
-			_ = anypb.UnmarshalTo(res.Transaction.Msg, msg, proto.UnmarshalOptions{})
-			mc.nextBatchWithdrawals = append(mc.nextBatchWithdrawals, &lib.DexLiquidityWithdraw{Address: msg.Address, Percent: msg.Percent, OrderId: orderID})
-		}
 	}
 }
 
@@ -737,82 +735,6 @@ func orderIDFromTxHashString(txHash string) []byte {
 		return nil
 	}
 	return orderIDFromTxHash(hashBytes)
-}
-
-func (mc *mockChain) rotateDexBatches(state *mockState, height uint64) {
-	if height > 1 && height%4 == 2 {
-		mc.lockedBatch = mc.generateDexBatch(height, false, mc.nextBatchOrders, mc.nextBatchDeposits, mc.nextBatchWithdrawals)
-		mc.lockedBatchHeight = height
-		mc.scheduledBatches[height+4] = mc.lockedBatch
-		mc.nextBatchOrders = nil
-		mc.nextBatchDeposits = nil
-		mc.nextBatchWithdrawals = nil
-	}
-}
-
-func (mc *mockChain) applyScheduledDex(state *mockState, height uint64) {
-	batch, ok := mc.scheduledBatches[height]
-	if !ok || batch == nil {
-		return
-	}
-	delete(mc.scheduledBatches, height)
-
-	state.applyBatchOrders(batch.Orders)
-	state.applyBatchDeposits(batch.Deposits)
-	withdrawResults := state.applyBatchWithdrawals(batch.Withdrawals)
-
-	var ev lib.Events
-	for _, o := range batch.Orders {
-		ev = append(ev, &lib.Event{
-			EventType:   string(lib.EventTypeDexSwap),
-			Msg:         &lib.Event_DexSwap{DexSwap: &lib.EventDexSwap{SoldAmount: o.AmountForSale, BoughtAmount: o.RequestedAmount, LocalOrigin: true, Success: true, OrderId: o.OrderId}},
-			Height:      height,
-			BlockHeight: height,
-			BlockHash:   blockHash(height),
-			ChainId:     mc.chainID,
-			Address:     o.Address,
-			Reference:   "BEGIN_BLOCK",
-		})
-	}
-	for _, d := range batch.Deposits {
-		ev = append(ev, &lib.Event{
-			EventType:   string(lib.EventTypeDexLiquidityDeposit),
-			Msg:         &lib.Event_DexLiquidityDeposit{DexLiquidityDeposit: &lib.EventDexLiquidityDeposit{Amount: d.Amount, Points: d.Amount / 10, OrderId: d.OrderId}},
-			Height:      height,
-			BlockHeight: height,
-			BlockHash:   blockHash(height),
-			ChainId:     mc.chainID,
-			Address:     d.Address,
-			Reference:   "BEGIN_BLOCK",
-		})
-	}
-	for i, w := range batch.Withdrawals {
-		localAmount := uint64(0)
-		pointsBurned := uint64(0)
-		if i < len(withdrawResults) {
-			localAmount = withdrawResults[i].localAmount
-			pointsBurned = withdrawResults[i].pointsBurned
-		}
-		remoteAmount := localAmount
-		if batch.PoolSize > 0 && batch.CounterPoolSize > 0 {
-			remoteAmount = lib.SafeMulDiv(localAmount, batch.CounterPoolSize, batch.PoolSize)
-		}
-		ev = append(ev, &lib.Event{
-			EventType: string(lib.EventTypeDexLiquidityWithdraw),
-			Msg: &lib.Event_DexLiquidityWithdrawal{DexLiquidityWithdrawal: &lib.EventDexLiquidityWithdrawal{
-				LocalAmount: localAmount, RemoteAmount: remoteAmount, OrderId: w.OrderId, PointsBurned: pointsBurned,
-			}},
-			Height:      height,
-			BlockHeight: height,
-			BlockHash:   blockHash(height),
-			ChainId:     mc.chainID,
-			Address:     w.Address,
-			Reference:   "BEGIN_BLOCK",
-		})
-	}
-	if len(ev) > 0 {
-		state.addEvents(nil, ev)
-	}
 }
 
 func (mc *mockChain) latestHeight() uint64 {
@@ -869,17 +791,103 @@ func blockHash(height uint64) []byte {
 	if height == 0 {
 		return make([]byte, sha256.Size)
 	}
-	return hashBytes("block", height)
-}
-
-func hashBytes(parts ...any) []byte {
-	h := sha256.New()
-	for _, p := range parts {
-		h.Write([]byte(fmt.Sprint(p)))
-	}
-	return h.Sum(nil)
+	return gen.HashBytes("block", height)
 }
 
 func addressBytes(label string) []byte {
-	return hashBytes(label)[:20]
+	return gen.HashBytes(label)[:20]
+}
+
+// --- internal/rpc-facing exported accessors ---
+//
+// internal/rpc's handlers used to reach directly into mockChain's fields when
+// everything was one package (Tasks 1-15). Now that rpc is a separate
+// package, it can only see mockChain through these exported methods — the
+// unexported fields/methods above stay internal to chain.
+
+func (mc *mockChain) BlockAt(height uint64) (*lib.BlockResult, bool) {
+	b, ok := mc.blocks[height]
+	return b, ok
+}
+
+func (mc *mockChain) CertAt(height uint64) (*lib.QuorumCertificate, bool) {
+	c, ok := mc.certs[height]
+	return c, ok
+}
+
+func (mc *mockChain) StateAt(height uint64) *fsm.GenesisState {
+	return mc.stateAt(height)
+}
+
+func (mc *mockChain) TxsAt(height uint64) []*lib.TxResult {
+	return mc.txs[height]
+}
+
+func (mc *mockChain) EventsAt(height uint64) []*lib.Event {
+	return mc.events[height]
+}
+
+func (mc *mockChain) LatestHeight() uint64 {
+	return mc.latestHeight()
+}
+
+func (mc *mockChain) ChainID() uint64 {
+	return mc.chainID
+}
+
+// DexBatchAt/NextDexBatchAt/Params/Committees/SubsidizedCommittees/
+// RetiredCommittees/Poll/Proposals/SupplyAt/DexPricesAt/NonSigners/
+// DoubleSigners were not in the task brief's explicit 7-method list, but
+// server_routes.go (now internal/rpc) reads all of these directly off
+// mockChain too — they need the same exported-accessor treatment for rpc to
+// compile against chain's now-private fields.
+
+func (mc *mockChain) DexBatchAt(height uint64) (*lib.DexBatch, bool) {
+	b, ok := mc.dexBatches[height]
+	return b, ok
+}
+
+func (mc *mockChain) NextDexBatchAt(height uint64) (*lib.DexBatch, bool) {
+	b, ok := mc.nextDexBatches[height]
+	return b, ok
+}
+
+func (mc *mockChain) Params() *fsm.Params {
+	return mc.params
+}
+
+func (mc *mockChain) Committees() *lib.CommitteesData {
+	return mc.committees
+}
+
+func (mc *mockChain) SubsidizedCommittees() []uint64 {
+	return mc.subsidizedCommittees
+}
+
+func (mc *mockChain) RetiredCommittees() []uint64 {
+	return mc.retiredCommittees
+}
+
+func (mc *mockChain) Poll() fsm.Poll {
+	return mc.poll
+}
+
+func (mc *mockChain) Proposals() fsm.GovProposals {
+	return mc.proposals
+}
+
+func (mc *mockChain) SupplyAt(height uint64) *fsm.Supply {
+	return mc.supplyAt(height)
+}
+
+func (mc *mockChain) DexPricesAt(height uint64) []lib.DexPrice {
+	return mc.dexPricesAt(height)
+}
+
+func (mc *mockChain) NonSigners(height uint64) fsm.NonSigners {
+	return mc.nonSigners(height)
+}
+
+func (mc *mockChain) DoubleSigners(height uint64) []*lib.DoubleSigner {
+	return mc.doubleSigners(height)
 }

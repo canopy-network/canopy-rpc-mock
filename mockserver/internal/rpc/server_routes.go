@@ -1,13 +1,15 @@
-package main
+package rpc
 
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"math"
 	"net/http"
 	"strconv"
 
+	"github.com/canopy-network/canopy-rpc-mock/mockserver/internal/chain"
 	"github.com/canopy-network/canopy/fsm"
 	"github.com/canopy-network/canopy/lib"
 	"google.golang.org/protobuf/proto"
@@ -50,6 +52,7 @@ const (
 	retiredCommitteesPath    = "/v1/query/retired-committees"
 	pollPath                 = "/v1/gov/poll"
 	proposalsPath            = "/v1/gov/proposals"
+	indexerBlobsPath         = "/v1/query/indexer-blobs"
 )
 
 type heightPageRequest struct {
@@ -92,17 +95,20 @@ func normalizeOrderBooks(src *lib.OrderBooks) *lib.OrderBooks {
 	return dst
 }
 
-func registerRoutes(mux *http.ServeMux, mc *mockChain) {
+// RegisterRoutes wires every mock RPC endpoint onto mux against mc. It's
+// exported because mockserver.New (the root package) is the only caller
+// outside this package.
+func RegisterRoutes(mux *http.ServeMux, mc *chain.MockChain) {
 	mux.HandleFunc(headPath, func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, &lib.HeightResult{Height: mc.latestHeight()})
+		writeJSON(w, http.StatusOK, &lib.HeightResult{Height: mc.LatestHeight()})
 	})
 
 	mux.HandleFunc(blockByHeightPath, func(w http.ResponseWriter, r *http.Request) {
 		req := parseHeightReq(r)
 		if req == 0 {
-			req = mc.latestHeight()
+			req = mc.LatestHeight()
 		}
-		block, ok := mc.blocks[req]
+		block, ok := mc.BlockAt(req)
 		if !ok {
 			http.Error(w, "unknown height", http.StatusNotFound)
 			return
@@ -113,9 +119,9 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 	mux.HandleFunc(certByHeightPath, func(w http.ResponseWriter, r *http.Request) {
 		req := parseHeightReq(r)
 		if req == 0 {
-			req = mc.latestHeight()
+			req = mc.LatestHeight()
 		}
-		cert, ok := mc.certs[req]
+		cert, ok := mc.CertAt(req)
 		if !ok {
 			http.Error(w, "unknown height", http.StatusNotFound)
 			return
@@ -126,9 +132,9 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 	mux.HandleFunc(statePath, func(w http.ResponseWriter, r *http.Request) {
 		h := parseHeightReq(r)
 		if h == 0 && r.URL.Query().Get("height") == "" && r.ContentLength == 0 {
-			h = mc.latestHeight()
+			h = mc.LatestHeight()
 		}
-		state := mc.stateAt(h)
+		state := mc.StateAt(h)
 		if state == nil {
 			http.Error(w, "unknown height", http.StatusNotFound)
 			return
@@ -140,9 +146,9 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 		req := heightPageRequest{}
 		decodeBody(r, &req)
 		if req.Height == 0 {
-			req.Height = mc.latestHeight()
+			req.Height = mc.LatestHeight()
 		}
-		txs := mc.txs[req.Height]
+		txs := mc.TxsAt(req.Height)
 		pageItems, params, total := paginate(txs, req.PageNumber, req.PerPage)
 		results := lib.TxResults(pageItems)
 		page := buildPage(&results, params, lib.TxResultsPageName, total)
@@ -153,9 +159,9 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 		req := heightPageRequest{}
 		decodeBody(r, &req)
 		if req.Height == 0 {
-			req.Height = mc.latestHeight()
+			req.Height = mc.LatestHeight()
 		}
-		events := mc.events[req.Height]
+		events := mc.EventsAt(req.Height)
 		pageItems, params, total := paginate(events, req.PageNumber, req.PerPage)
 		results := lib.Events(pageItems)
 		page := buildPage(&results, params, lib.EventsPageName, total)
@@ -166,9 +172,9 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 		req := heightPageRequest{}
 		decodeBody(r, &req)
 		if req.Height == 0 {
-			req.Height = mc.latestHeight()
+			req.Height = mc.LatestHeight()
 		}
-		state := mc.stateAt(req.Height)
+		state := mc.StateAt(req.Height)
 		if state == nil {
 			http.Error(w, "unknown height", http.StatusNotFound)
 			return
@@ -184,9 +190,9 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 		req := idHeightRequest{}
 		decodeBody(r, &req)
 		if req.Height == 0 {
-			req.Height = mc.latestHeight()
+			req.Height = mc.LatestHeight()
 		}
-		state := mc.stateAt(req.Height)
+		state := mc.StateAt(req.Height)
 		if state == nil {
 			http.Error(w, "unknown height", http.StatusNotFound)
 			return
@@ -209,9 +215,9 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 		req := heightPageRequest{}
 		decodeBody(r, &req)
 		if req.Height == 0 {
-			req.Height = mc.latestHeight()
+			req.Height = mc.LatestHeight()
 		}
-		state := mc.stateAt(req.Height)
+		state := mc.StateAt(req.Height)
 		if state == nil {
 			http.Error(w, "unknown height", http.StatusNotFound)
 			return
@@ -226,7 +232,7 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 	mux.HandleFunc(dexPricePath, func(w http.ResponseWriter, r *http.Request) {
 		req := idHeightRequest{}
 		decodeBody(r, &req)
-		prices := mc.dexPricesAt(req.Height)
+		prices := mc.DexPricesAt(req.Height)
 		if prices == nil {
 			http.Error(w, "unknown height", http.StatusNotFound)
 			return
@@ -248,13 +254,13 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 		req := dexRequest{}
 		decodeBody(r, &req)
 		if req.Height == 0 {
-			req.Height = mc.latestHeight()
+			req.Height = mc.LatestHeight()
 		}
-		if req.ID != 0 && req.ID != mc.chainID {
+		if req.ID != 0 && req.ID != mc.ChainID() {
 			http.Error(w, "unknown committee", http.StatusNotFound)
 			return
 		}
-		if batch, ok := mc.dexBatches[req.Height]; ok {
+		if batch, ok := mc.DexBatchAt(req.Height); ok {
 			// Return as array to match real API format
 			writeJSON(w, http.StatusOK, []*lib.DexBatch{batch})
 			return
@@ -266,13 +272,13 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 		req := dexRequest{}
 		decodeBody(r, &req)
 		if req.Height == 0 {
-			req.Height = mc.latestHeight()
+			req.Height = mc.LatestHeight()
 		}
-		if req.ID != 0 && req.ID != mc.chainID {
+		if req.ID != 0 && req.ID != mc.ChainID() {
 			http.Error(w, "unknown committee", http.StatusNotFound)
 			return
 		}
-		if batch, ok := mc.nextDexBatches[req.Height]; ok {
+		if batch, ok := mc.NextDexBatchAt(req.Height); ok {
 			// Return as array to match real API format
 			writeJSON(w, http.StatusOK, []*lib.DexBatch{batch})
 			return
@@ -281,27 +287,27 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 	})
 
 	mux.HandleFunc(allParamsPath, func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, mc.params)
+		writeJSON(w, http.StatusOK, mc.Params())
 	})
 	mux.HandleFunc(feeParamsPath, func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, mc.params.Fee)
+		writeJSON(w, http.StatusOK, mc.Params().Fee)
 	})
 	mux.HandleFunc(conParamsPath, func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, mc.params.Consensus)
+		writeJSON(w, http.StatusOK, mc.Params().Consensus)
 	})
 	mux.HandleFunc(valParamsPath, func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, mc.params.Validator)
+		writeJSON(w, http.StatusOK, mc.Params().Validator)
 	})
 	mux.HandleFunc(govParamsPath, func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, mc.params.Governance)
+		writeJSON(w, http.StatusOK, mc.Params().Governance)
 	})
 
 	mux.HandleFunc(supplyPath, func(w http.ResponseWriter, r *http.Request) {
 		h := parseHeightReq(r)
 		if h == 0 {
-			h = mc.latestHeight()
+			h = mc.LatestHeight()
 		}
-		supply := mc.supplyAt(h)
+		supply := mc.SupplyAt(h)
 		if supply == nil {
 			http.Error(w, "unknown height", http.StatusNotFound)
 			return
@@ -313,9 +319,9 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 		req := heightPageRequest{}
 		decodeBody(r, &req)
 		if req.Height == 0 {
-			req.Height = mc.latestHeight()
+			req.Height = mc.LatestHeight()
 		}
-		state := mc.stateAt(req.Height)
+		state := mc.StateAt(req.Height)
 		if state == nil {
 			http.Error(w, "unknown height", http.StatusNotFound)
 			return
@@ -330,9 +336,9 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 	mux.HandleFunc(nonSignersPath, func(w http.ResponseWriter, r *http.Request) {
 		h := parseHeightReq(r)
 		if h == 0 {
-			h = mc.latestHeight()
+			h = mc.LatestHeight()
 		}
-		results := mc.nonSigners(h)
+		results := mc.NonSigners(h)
 		writeJSON(w, http.StatusOK, simplePageResp{
 			PageNumber: 1,
 			PerPage:    100,
@@ -346,9 +352,9 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 	mux.HandleFunc(doubleSignersPath, func(w http.ResponseWriter, r *http.Request) {
 		h := parseHeightReq(r)
 		if h == 0 {
-			h = mc.latestHeight()
+			h = mc.LatestHeight()
 		}
-		results := mc.doubleSigners(h)
+		results := mc.DoubleSigners(h)
 		writeJSON(w, http.StatusOK, simplePageResp{
 			PageNumber: 1,
 			PerPage:    100,
@@ -360,38 +366,73 @@ func registerRoutes(mux *http.ServeMux, mc *mockChain) {
 	})
 
 	mux.HandleFunc(committeesDataPath, func(w http.ResponseWriter, _ *http.Request) {
-		state := mc.stateAt(mc.latestHeight())
+		state := mc.StateAt(mc.LatestHeight())
 		if state != nil && state.Committees != nil {
 			writeJSON(w, http.StatusOK, state.Committees)
 			return
 		}
-		writeJSON(w, http.StatusOK, mc.committees)
+		writeJSON(w, http.StatusOK, mc.Committees())
 	})
 
 	mux.HandleFunc(subsidizedCommitteesPath, func(w http.ResponseWriter, _ *http.Request) {
-		state := mc.stateAt(mc.latestHeight())
+		state := mc.StateAt(mc.LatestHeight())
 		if state != nil && state.Committees != nil {
-			writeJSON(w, http.StatusOK, mc.subsidizedCommittees)
+			writeJSON(w, http.StatusOK, mc.SubsidizedCommittees())
 			return
 		}
-		writeJSON(w, http.StatusOK, mc.subsidizedCommittees)
+		writeJSON(w, http.StatusOK, mc.SubsidizedCommittees())
 	})
 
 	mux.HandleFunc(retiredCommitteesPath, func(w http.ResponseWriter, _ *http.Request) {
-		state := mc.stateAt(mc.latestHeight())
+		state := mc.StateAt(mc.LatestHeight())
 		if state != nil && len(state.RetiredCommittees) > 0 {
 			writeJSON(w, http.StatusOK, state.RetiredCommittees)
 			return
 		}
-		writeJSON(w, http.StatusOK, mc.retiredCommittees)
+		writeJSON(w, http.StatusOK, mc.RetiredCommittees())
 	})
 
 	mux.HandleFunc(pollPath, func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, mc.poll)
+		writeJSON(w, http.StatusOK, mc.Poll())
 	})
 
 	mux.HandleFunc(proposalsPath, func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, mc.proposals)
+		writeJSON(w, http.StatusOK, mc.Proposals())
+	})
+
+	mux.HandleFunc(indexerBlobsPath, func(w http.ResponseWriter, r *http.Request) {
+		req := struct {
+			Height uint64 `json:"height"`
+			Delta  bool   `json:"delta"`
+		}{}
+		decodeBody(r, &req)
+		if req.Height == 0 {
+			req.Height = mc.LatestHeight()
+		}
+		blobs, err := mc.BuildIndexerBlobs(req.Height)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, chain.ErrUnknownHeight) {
+				status = http.StatusNotFound
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+		// Delta sparsification is unconditional on the real node — ignores
+		// req.Delta — and this mock matches that (spec Section 10).
+		deltaBlobs, derr := fsm.DeltaIndexerBlobs(blobs)
+		if derr != nil {
+			http.Error(w, derr.Error(), http.StatusInternalServerError)
+			return
+		}
+		bz, merr := lib.Marshal(deltaBlobs)
+		if merr != nil {
+			http.Error(w, merr.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bz)
 	})
 }
 
