@@ -450,8 +450,17 @@ func (mc *mockChain) buildTxMsg(label string, sender, recipient []byte, height u
 	case "dexLiqWithdraw":
 		msg = &fsm.MessageDexLiquidityWithdraw{ChainId: mc.chainID, Percent: 10, Address: sender}
 	case "stake":
+		// PublicKey must be an actual ed25519/secp256k1/bls key, not an address —
+		// crypto.NewPublicKeyFromBytes dispatches purely on byte length (see
+		// canopy lib/crypto/key.go NewPublicKeyFromBytes), and a 20-byte address
+		// matches none of the recognized key sizes. Derive a deterministic
+		// throwaway keypair the same way buildValidators does, seeded off the
+		// sender address and height so it stays reproducible across runs.
+		stakeSeed := gen.HashBytes("stake-pubkey", sender, height)
+		stakePriv := ed25519.NewKeyFromSeed(stakeSeed)
+		stakePub, _ := crypto.NewPublicKeyFromBytes(stakePriv.Public().(ed25519.PublicKey))
 		msg = &fsm.MessageStake{
-			PublicKey:     sender,
+			PublicKey:     stakePub.Bytes(),
 			Amount:        10_000,
 			Committees:    []uint64{mc.chainID},
 			NetAddress:    fmt.Sprintf("127.0.0.1:%d", 26650),
